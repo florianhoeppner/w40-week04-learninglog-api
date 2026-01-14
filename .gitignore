@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.pyd
+*.c
 .Python
 build/
 develop-eggs/
@@ -40,6 +42,7 @@ env/
 .env
 .env.local
 .env.*.local
+.env.*
 
 # Database files
 *.db
