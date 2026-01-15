@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, HttpUrl
 
 
 # -----------------------------------------------------------------------------
@@ -39,10 +39,14 @@ from pydantic import BaseModel
 app = FastAPI(title="CatAtlas API")
 
 # CORS: allows your frontend (different port/domain) to call this backend.
-# For learning projects, allow all origins. Later: restrict to your frontend domain.
+# Configure allowed origins via CORS_ORIGINS environment variable (comma-separated)
+# Default to "*" for local development
+cors_origins_str = os.getenv("CORS_ORIGINS", "*")
+allowed_origins = [origin.strip() for origin in cors_origins_str.split(",")] if cors_origins_str != "*" else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # OK for dev/learning
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -205,10 +209,10 @@ class EntryCreate(BaseModel):
     Client payload to create a new sighting/entry.
     Notes (text) is required. nickname/location are optional.
     """
-    text: str
-    nickname: Optional[str] = None
-    location: Optional[str] = None
-    photo_url: Optional[str] = None  # NEW
+    text: str = Field(..., min_length=1, max_length=5000, description="Sighting notes")
+    nickname: Optional[str] = Field(None, max_length=100, description="Cat nickname")
+    location: Optional[str] = Field(None, max_length=200, description="Location description")
+    photo_url: Optional[str] = Field(None, max_length=1000, description="Photo URL")
 
 class CatProfile(BaseModel):
     cat_id: int
@@ -244,7 +248,7 @@ class EntryAnalysis(BaseModel):
     updatedAt: str
 
 class CatCreate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(None, max_length=100, description="Cat name/nickname")
 
 class Cat(BaseModel):
     id: int
@@ -275,8 +279,8 @@ class CatInsightRequest(BaseModel):
     mode controls what we generate.
     question is optional and lets the UI ask specific things later.
     """
-    mode: str  # "profile" | "care" | "update" | "risk"
-    question: Optional[str] = None
+    mode: str = Field(..., pattern="^(profile|care|update|risk)$", description="Insight mode")
+    question: Optional[str] = Field(None, max_length=500, description="Optional question")
 
 
 class Citation(BaseModel):
@@ -694,12 +698,6 @@ def cat_insights(cat_id: int, payload: CatInsightRequest):
     conn.close()
 
     return insight
-
-
-@app.get("/health")
-def health():
-    """Simple health endpoint. Handy for debugging and future monitoring."""
-    return {"status": "ok"}
 
 
 @app.get("/cats/{cat_id}/profile", response_model=CatProfile)
