@@ -19,17 +19,46 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import os
 from pathlib import Path
 from collections import Counter
 from datetime import datetime
-from pathlib import Path
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, HttpUrl
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, HttpUrl, ValidationError
+
+
+# -----------------------------------------------------------------------------
+# Logging Configuration
+# -----------------------------------------------------------------------------
+
+# Configure logging
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+
+
+# -----------------------------------------------------------------------------
+# Custom Exceptions
+# -----------------------------------------------------------------------------
+
+class DatabaseError(Exception):
+    """Raised when database operations fail"""
+    pass
+
+
+class ResourceNotFoundError(Exception):
+    """Raised when a requested resource doesn't exist"""
+    pass
 
 
 # -----------------------------------------------------------------------------
@@ -37,6 +66,55 @@ from pydantic import BaseModel, Field, HttpUrl
 # -----------------------------------------------------------------------------
 
 app = FastAPI(title="CatAtlas API")
+
+
+# -----------------------------------------------------------------------------
+# Exception Handlers
+# -----------------------------------------------------------------------------
+
+@app.exception_handler(DatabaseError)
+async def database_exception_handler(request: Request, exc: DatabaseError):
+    logger.error(f"Database error: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "A database error occurred. Please try again later."}
+    )
+
+
+@app.exception_handler(ResourceNotFoundError)
+async def resource_not_found_handler(request: Request, exc: ResourceNotFoundError):
+    logger.warning(f"Resource not found: {exc}")
+    return JSONResponse(
+        status_code=status.HTTP_404_NOT_FOUND,
+        content={"detail": str(exc)}
+    )
+
+
+@app.exception_handler(ValidationError)
+async def validation_exception_handler(request: Request, exc: ValidationError):
+    logger.warning(f"Validation error: {exc}")
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": exc.errors()}
+    )
+
+
+@app.exception_handler(sqlite3.IntegrityError)
+async def integrity_error_handler(request: Request, exc: sqlite3.IntegrityError):
+    logger.error(f"Database integrity error: {exc}")
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={"detail": "A database constraint was violated."}
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "An unexpected error occurred."}
+    )
 
 # CORS: allows your frontend (different port/domain) to call this backend.
 # Configure allowed origins via CORS_ORIGINS environment variable (comma-separated)
@@ -80,10 +158,18 @@ def get_conn() -> sqlite3.Connection:
         SQLite by default restricts a connection to the creating thread.
     - row_factory=sqlite3.Row:
         Allows dict-like access row["column_name"].
+
+    Raises:
+        DatabaseError: If connection to database fails
     """
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        logger.debug(f"Database connection established to {DB_PATH}")
+        return conn
+    except sqlite3.Error as e:
+        logger.error(f"Failed to connect to database: {e}")
+        raise DatabaseError(f"Failed to connect to database: {e}") from e
 
 
 def _try_alter_table(cur: sqlite3.Cursor, sql: str) -> None:
@@ -864,33 +950,41 @@ def get_entries():
     """
     Return all entries, newest first.
     """
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-    """
-    SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url
-    FROM entries
-    ORDER BY id DESC
-    """
-    )
-    rows = cur.fetchall()
-    conn.close()
-
-    result: list[Entry] = []
-    for r in rows:
-        result.append(
-            Entry(
-                id=r["id"],
-                text=r["text"],
-                createdAt=r["createdAt"],
-                isFavorite=bool(r["isFavorite"]),
-                nickname=r["nickname"],
-                location=r["location"],
-                cat_id=r["cat_id"],
-                photo_url=r["photo_url"],
-            )
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+        """
+        SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url
+        FROM entries
+        ORDER BY id DESC
+        """
         )
-    return result
+        rows = cur.fetchall()
+        logger.debug(f"Retrieved {len(rows)} entries")
+
+        result: list[Entry] = []
+        for r in rows:
+            result.append(
+                Entry(
+                    id=r["id"],
+                    text=r["text"],
+                    createdAt=r["createdAt"],
+                    isFavorite=bool(r["isFavorite"]),
+                    nickname=r["nickname"],
+                    location=r["location"],
+                    cat_id=r["cat_id"],
+                    photo_url=r["photo_url"],
+                )
+            )
+        return result
+    except sqlite3.Error as e:
+        logger.error(f"Failed to retrieve entries: {e}")
+        raise DatabaseError(f"Failed to retrieve entries: {e}") from e
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.post("/cats", response_model=Cat)
@@ -913,6 +1007,7 @@ def create_cat(payload: CatCreate):
 
 @app.post("/entries", response_model=Entry)
 def create_entry(payload: EntryCreate):
+    """Create a new cat sighting entry"""
     text = payload.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="text must not be empty")
@@ -923,29 +1018,37 @@ def create_entry(payload: EntryCreate):
     location = payload.location.strip() if payload.location and payload.location.strip() else None
     photo_url = payload.photo_url.strip() if payload.photo_url and payload.photo_url.strip() else None
 
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (text, created_at, 0, nickname, location, None, photo_url),
-    )
-    conn.commit()
-    new_id = cur.lastrowid
-    conn.close()
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (text, created_at, 0, nickname, location, None, photo_url),
+        )
+        conn.commit()
+        new_id = cur.lastrowid
+        logger.info(f"Created new entry with ID {new_id}")
 
-    return Entry(
-        id=new_id,
-        text=text,
-        createdAt=created_at,
-        isFavorite=False,
-        nickname=nickname,
-        location=location,
-        cat_id=None,
-        photo_url=photo_url,
-    )
+        return Entry(
+            id=new_id,
+            text=text,
+            createdAt=created_at,
+            isFavorite=False,
+            nickname=nickname,
+            location=location,
+            cat_id=None,
+            photo_url=photo_url,
+        )
+    except sqlite3.Error as e:
+        logger.error(f"Failed to create entry: {e}")
+        raise DatabaseError(f"Failed to create entry: {e}") from e
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.post("/entries/{entry_id}/favorite", response_model=Entry)
@@ -953,39 +1056,48 @@ def toggle_favorite(entry_id: int):
     """
     Toggle isFavorite for an entry.
     """
-    conn = get_conn()
-    cur = conn.cursor()
+    conn = None
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
 
-    cur.execute(
-        """
-        SELECT id, text, createdAt, isFavorite, nickname, location
-        FROM entries
-        WHERE id = ?
-        """,
-        (entry_id,),
-    )
-    row = cur.fetchone()
-    if row is None:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Entry not found")
+        cur.execute(
+            """
+            SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url
+            FROM entries
+            WHERE id = ?
+            """,
+            (entry_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise ResourceNotFoundError(f"Entry with ID {entry_id} not found")
 
-    new_fav = 0 if row["isFavorite"] else 1
+        new_fav = 0 if row["isFavorite"] else 1
 
-    cur.execute(
-        "UPDATE entries SET isFavorite = ? WHERE id = ?",
-        (new_fav, entry_id),
-    )
-    conn.commit()
-    conn.close()
+        cur.execute(
+            "UPDATE entries SET isFavorite = ? WHERE id = ?",
+            (new_fav, entry_id),
+        )
+        conn.commit()
+        logger.info(f"Toggled favorite for entry {entry_id} to {bool(new_fav)}")
 
-    return Entry(
-        id=row["id"],
-        text=row["text"],
-        createdAt=row["createdAt"],
-        isFavorite=bool(new_fav),
-        nickname=row["nickname"],
-        location=row["location"],
-    )
+        return Entry(
+            id=row["id"],
+            text=row["text"],
+            createdAt=row["createdAt"],
+            isFavorite=bool(new_fav),
+            nickname=row["nickname"],
+            location=row["location"],
+            cat_id=row["cat_id"],
+            photo_url=row["photo_url"],
+        )
+    except sqlite3.Error as e:
+        logger.error(f"Failed to toggle favorite for entry {entry_id}: {e}")
+        raise DatabaseError(f"Failed to update entry: {e}") from e
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.get("/cats", response_model=List[Cat])
