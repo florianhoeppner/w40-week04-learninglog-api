@@ -6,6 +6,7 @@ Tests complete workflows and interactions between different endpoints
 
 import sys
 from pathlib import Path
+import importlib
 
 # Add backend directory to Python import path
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -22,9 +23,11 @@ def client(tmp_path: Path):
     db_path = tmp_path / "test.db"
     os.environ["CATATLAS_DB_PATH"] = str(db_path)
 
-    from main import app, init_db
-    init_db()
-    return TestClient(app)
+    # Reload module to pick up new DB path
+    import main
+    importlib.reload(main)
+    main.init_db()
+    return TestClient(main.app)
 
 
 @pytest.mark.integration
@@ -99,7 +102,7 @@ class TestCompleteWorkflow:
             assert insight_response.status_code == 200
             insight = insight_response.json()
             assert insight["mode"] == mode
-            assert len(insight["actions"]) > 0
+            assert len(insight["suggested_actions"]) > 0
 
     def test_duplicate_detection_workflow(self, client: TestClient):
         """
@@ -199,9 +202,9 @@ class TestErrorRecovery:
 
     def test_recovery_from_invalid_input(self, client: TestClient):
         """System should recover from invalid input"""
-        # Try to create invalid entry
+        # Try to create invalid entry (empty text fails Pydantic min_length=1)
         invalid_response = client.post("/entries", json={"text": ""})
-        assert invalid_response.status_code == 400
+        assert invalid_response.status_code == 422
 
         # Should still be able to create valid entry
         valid_response = client.post("/entries", json={"text": "Valid entry"})

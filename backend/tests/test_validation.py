@@ -10,6 +10,7 @@ Tests for:
 
 import sys
 from pathlib import Path
+import importlib
 
 # Add backend directory to Python import path
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -26,19 +27,20 @@ def client(tmp_path: Path):
     db_path = tmp_path / "test.db"
     os.environ["CATATLAS_DB_PATH"] = str(db_path)
 
-    from main import app, init_db
-    init_db()
-    return TestClient(app)
+    # Reload module to pick up new DB path
+    import main
+    importlib.reload(main)
+    main.init_db()
+    return TestClient(main.app)
 
 
 class TestEntryValidation:
     """Test entry creation validation"""
 
     def test_empty_text_rejected(self, client: TestClient):
-        """Empty text should be rejected"""
+        """Empty text should be rejected by Pydantic min_length validation"""
         response = client.post("/entries", json={"text": ""})
-        assert response.status_code == 400
-        assert "empty" in response.json()["detail"].lower()
+        assert response.status_code == 422  # Pydantic validation error
 
     def test_whitespace_only_text_rejected(self, client: TestClient):
         """Whitespace-only text should be rejected"""
