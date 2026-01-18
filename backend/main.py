@@ -24,6 +24,15 @@ import re
 import sqlite3
 import os
 from pathlib import Path
+from typing import Union
+
+# PostgreSQL support (optional - used when DATABASE_URL is set)
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    POSTGRES_AVAILABLE = True
+except ImportError:
+    POSTGRES_AVAILABLE = False
 from collections import Counter
 from datetime import datetime
 from typing import List, Optional
@@ -100,12 +109,23 @@ async def validation_exception_handler(request: Request, exc: ValidationError):
 
 
 @app.exception_handler(sqlite3.IntegrityError)
-async def integrity_error_handler(request: Request, exc: sqlite3.IntegrityError):
-    logger.error(f"Database integrity error: {exc}")
+async def sqlite_integrity_error_handler(request: Request, exc: sqlite3.IntegrityError):
+    logger.error(f"SQLite integrity error: {exc}")
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT,
         content={"detail": "A database constraint was violated."}
     )
+
+
+# PostgreSQL IntegrityError handler (only if psycopg2 is available)
+if POSTGRES_AVAILABLE:
+    @app.exception_handler(psycopg2.IntegrityError)
+    async def postgres_integrity_error_handler(request: Request, exc):
+        logger.error(f"PostgreSQL integrity error: {exc}")
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"detail": "A database constraint was violated."}
+        )
 
 
 @app.exception_handler(Exception)
@@ -141,138 +161,251 @@ def health():
 
 
 # -----------------------------------------------------------------------------
-# SQLite configuration
+# Database configuration (SQLite for local dev, PostgreSQL for production)
 # -----------------------------------------------------------------------------
 
-# Allow tests to point the app to a temporary DB file
+# PostgreSQL connection URL (standard for cloud hosting like Railway, Heroku, etc.)
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+# SQLite fallback path for local development
 DB_PATH = Path(os.getenv("CATATLAS_DB_PATH", str(Path(__file__).parent / "learninglog.db")))
 
 
+def is_postgres() -> bool:
+    """Check if we're using PostgreSQL (based on DATABASE_URL being set)."""
+    return bool(DATABASE_URL) and POSTGRES_AVAILABLE
 
-def get_conn() -> sqlite3.Connection:
+
+def get_conn() -> Union[sqlite3.Connection, "psycopg2.extensions.connection"]:
     """
-    Open a SQLite connection.
+    Open a database connection (PostgreSQL or SQLite).
 
-    - check_same_thread=False:
-        FastAPI may handle requests in different threads.
-        SQLite by default restricts a connection to the creating thread.
-    - row_factory=sqlite3.Row:
-        Allows dict-like access row["column_name"].
+    PostgreSQL (production):
+        Used when DATABASE_URL environment variable is set.
+        Returns connection with RealDictCursor for dict-like row access.
+
+    SQLite (local development):
+        Used when DATABASE_URL is not set.
+        - check_same_thread=False: FastAPI may handle requests in different threads.
+        - row_factory=sqlite3.Row: Allows dict-like access row["column_name"].
 
     Raises:
         DatabaseError: If connection to database fails
     """
-    try:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        logger.debug(f"Database connection established to {DB_PATH}")
-        return conn
-    except sqlite3.Error as e:
-        logger.error(f"Failed to connect to database: {e}")
-        raise DatabaseError(f"Failed to connect to database: {e}") from e
+    if is_postgres():
+        try:
+            conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+            logger.debug("PostgreSQL connection established")
+            return conn
+        except psycopg2.Error as e:
+            logger.error(f"Failed to connect to PostgreSQL: {e}")
+            raise DatabaseError(f"Failed to connect to database: {e}") from e
+    else:
+        try:
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            logger.debug(f"SQLite connection established to {DB_PATH}")
+            return conn
+        except sqlite3.Error as e:
+            logger.error(f"Failed to connect to SQLite: {e}")
+            raise DatabaseError(f"Failed to connect to database: {e}") from e
 
 
-def _try_alter_table(cur: sqlite3.Cursor, sql: str) -> None:
+def sql_param() -> str:
+    """Return the appropriate SQL parameter placeholder for the current database.
+
+    SQLite uses ? for placeholders.
+    PostgreSQL uses %s for placeholders.
     """
-    SQLite doesn't support 'ADD COLUMN IF NOT EXISTS' in older versions.
-    So we attempt ALTER TABLE and ignore errors like 'duplicate column name'.
+    return "%s" if is_postgres() else "?"
+
+
+def sql_params(count: int) -> str:
+    """Return comma-separated parameter placeholders.
+
+    Example: sql_params(3) returns "?, ?, ?" for SQLite or "%s, %s, %s" for PostgreSQL.
+    """
+    p = sql_param()
+    return ", ".join([p] * count)
+
+
+def _try_alter_table(cur, sql: str) -> None:
+    """
+    Attempt to alter a table (e.g., add column). Ignore errors if column already exists.
+    Works with both SQLite and PostgreSQL.
     """
     try:
         cur.execute(sql)
-    except sqlite3.OperationalError:
-        # Example: duplicate column name => column already exists
-        # We intentionally ignore it to make init_db idempotent.
-        pass
+    except (sqlite3.OperationalError, Exception) as e:
+        # SQLite: "duplicate column name"
+        # PostgreSQL: "column already exists"
+        # We intentionally ignore these to make init_db idempotent.
+        error_msg = str(e).lower()
+        if "duplicate column" in error_msg or "already exists" in error_msg:
+            pass
+        else:
+            # Re-raise unexpected errors
+            raise
 
 
 def init_db() -> None:
     """
     Create required tables if they don't exist.
+    Supports both SQLite (local dev) and PostgreSQL (production).
     Also performs a minimal "migration" step for older DB files
     (adds new columns if missing).
     """
     conn = get_conn()
     cur = conn.cursor()
 
-    # --- Entries table (sightings) ---
-    # Keep this as your source-of-truth domain data.
-    # ------------------------------------------------------------
-    # Table: entries (existing) — treat as "sightings"
-    # ------------------------------------------------------------
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            text TEXT NOT NULL,
-            createdAt TEXT NOT NULL,
-            isFavorite INTEGER NOT NULL DEFAULT 0,
-            nickname TEXT,
-            location TEXT
+    if is_postgres():
+        # PostgreSQL schema
+        # ------------------------------------------------------------
+        # Table: entries (sightings)
+        # ------------------------------------------------------------
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS entries (
+                id SERIAL PRIMARY KEY,
+                text TEXT NOT NULL,
+                "createdAt" TEXT NOT NULL,
+                "isFavorite" BOOLEAN NOT NULL DEFAULT FALSE,
+                nickname TEXT,
+                location TEXT,
+                cat_id INTEGER,
+                photo_url TEXT
+            )
+            """
         )
-        """
-    )
 
-    # If entries table existed before nickname/location were added,
-    # these ALTER statements will add them (or no-op if already there).
+        # ------------------------------------------------------------
+        # Table: analyses (cached AI analysis)
+        # ------------------------------------------------------------
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analyses (
+                entry_id INTEGER PRIMARY KEY REFERENCES entries(id) ON DELETE CASCADE,
+                text_hash TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                tags_json TEXT NOT NULL,
+                sentiment TEXT NOT NULL,
+                "createdAt" TEXT NOT NULL,
+                "updatedAt" TEXT NOT NULL
+            )
+            """
+        )
+
+        # ------------------------------------------------------------
+        # Table: cats (identity concept)
+        # ------------------------------------------------------------
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cats (
+                id SERIAL PRIMARY KEY,
+                name TEXT,
+                "createdAt" TEXT NOT NULL
+            )
+            """
+        )
+
+        # ------------------------------------------------------------
+        # Table: cat_insights (cached GenAI outputs)
+        # ------------------------------------------------------------
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cat_insights (
+                id SERIAL PRIMARY KEY,
+                cat_id INTEGER NOT NULL REFERENCES cats(id) ON DELETE CASCADE,
+                mode TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                context_hash TEXT NOT NULL,
+                insight_json TEXT NOT NULL,
+                "createdAt" TEXT NOT NULL,
+                "updatedAt" TEXT NOT NULL,
+                UNIQUE(cat_id, mode, prompt_version, context_hash)
+            )
+            """
+        )
+
+        # Create indexes for better query performance
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_entries_cat_id ON entries(cat_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cat_insights_cat_id ON cat_insights(cat_id)")
+
+    else:
+        # SQLite schema
+        # ------------------------------------------------------------
+        # Table: entries (sightings)
+        # ------------------------------------------------------------
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT NOT NULL,
+                createdAt TEXT NOT NULL,
+                isFavorite INTEGER NOT NULL DEFAULT 0,
+                nickname TEXT,
+                location TEXT
+            )
+            """
+        )
+
         # Minimal migrations for older DBs (safe no-op if already exists)
-    _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN nickname TEXT")
-    _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN location TEXT")
-    # NEW: link a sighting to a cat identity
-    _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN cat_id INTEGER")
-    # NEW: photo dimension (for now: just a URL string)
-    _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN photo_url TEXT")
+        _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN nickname TEXT")
+        _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN location TEXT")
+        _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN cat_id INTEGER")
+        _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN photo_url TEXT")
 
-    # --- Analyses table ---
-    # Derived data: generated from entry text and cached/persisted.
-    # One analysis per entry_id (simple, sufficient for learning).
-
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS analyses (
-            entry_id INTEGER PRIMARY KEY,
-            text_hash TEXT NOT NULL,
-            summary TEXT NOT NULL,
-            tags_json TEXT NOT NULL,
-            sentiment TEXT NOT NULL,
-            createdAt TEXT NOT NULL,
-            updatedAt TEXT NOT NULL,
-            FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
+        # ------------------------------------------------------------
+        # Table: analyses (cached AI analysis)
+        # ------------------------------------------------------------
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analyses (
+                entry_id INTEGER PRIMARY KEY,
+                text_hash TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                tags_json TEXT NOT NULL,
+                sentiment TEXT NOT NULL,
+                createdAt TEXT NOT NULL,
+                updatedAt TEXT NOT NULL,
+                FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
+            )
+            """
         )
-        """
-    )
 
-    # --- Cats table + insights (new) ---
-    # Table: cat_insights (new) — cached GenAI outputs per cat + mode + context hash
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS cat_insights (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cat_id INTEGER NOT NULL,
-            mode TEXT NOT NULL,
-            prompt_version TEXT NOT NULL,
-            context_hash TEXT NOT NULL,
-            insight_json TEXT NOT NULL,
-            createdAt TEXT NOT NULL,
-            updatedAt TEXT NOT NULL,
-            UNIQUE(cat_id, mode, prompt_version, context_hash),
-            FOREIGN KEY(cat_id) REFERENCES cats(id) ON DELETE CASCADE
+        # ------------------------------------------------------------
+        # Table: cats (identity concept)
+        # ------------------------------------------------------------
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                createdAt TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
 
-    # ------------------------------------------------------------
-    # Table: cats (new) — explicit identity concept
-    # ------------------------------------------------------------
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS cats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,                -- user-assigned name (optional)
-            createdAt TEXT NOT NULL
+        # ------------------------------------------------------------
+        # Table: cat_insights (cached GenAI outputs)
+        # ------------------------------------------------------------
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cat_insights (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cat_id INTEGER NOT NULL,
+                mode TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                context_hash TEXT NOT NULL,
+                insight_json TEXT NOT NULL,
+                createdAt TEXT NOT NULL,
+                updatedAt TEXT NOT NULL,
+                UNIQUE(cat_id, mode, prompt_version, context_hash),
+                FOREIGN KEY(cat_id) REFERENCES cats(id) ON DELETE CASCADE
+            )
+            """
         )
-        """
-    )
+
     conn.commit()
     conn.close()
 
@@ -569,18 +702,19 @@ def make_context_hash(parts: list[str]) -> str:
     return hashlib.sha256(joined).hexdigest()
 
 
-def retrieve_cat_sightings(cur: sqlite3.Cursor, cat_id: int, limit: int = 10) -> list[sqlite3.Row]:
+def retrieve_cat_sightings(cur, cat_id: int, limit: int = 10) -> list:
     """
     Retrieve sightings for a cat (newest first).
-    Keep it simple: we’ll use the newest + keyword relevance if question exists later.
+    Keep it simple: we'll use the newest + keyword relevance if question exists later.
     """
+    p = sql_param()
     cur.execute(
-        """
-        SELECT id, text, location, createdAt
+        f"""
+        SELECT id, text, location, "createdAt"
         FROM entries
-        WHERE cat_id = ?
+        WHERE cat_id = {p}
         ORDER BY id DESC
-        LIMIT ?
+        LIMIT {p}
         """,
         (cat_id, limit),
     )
@@ -719,9 +853,10 @@ def cat_insights(cat_id: int, payload: CatInsightRequest):
 
     conn = get_conn()
     cur = conn.cursor()
+    p = sql_param()
 
     # Ensure cat exists
-    cur.execute("SELECT id FROM cats WHERE id = ?", (cat_id,))
+    cur.execute(f"SELECT id FROM cats WHERE id = {p}", (cat_id,))
     if cur.fetchone() is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Cat not found")
@@ -743,10 +878,10 @@ def cat_insights(cat_id: int, payload: CatInsightRequest):
 
     # Try cache
     cur.execute(
-        """
+        f"""
         SELECT insight_json
         FROM cat_insights
-        WHERE cat_id = ? AND mode = ? AND prompt_version = ? AND context_hash = ?
+        WHERE cat_id = {p} AND mode = {p} AND prompt_version = {p} AND context_hash = {p}
         """,
         (cat_id, mode, PROMPT_VERSION, context_hash),
     )
@@ -766,9 +901,9 @@ def cat_insights(cat_id: int, payload: CatInsightRequest):
 
     now = datetime.utcnow().isoformat() + "Z"
     cur.execute(
-        """
-        INSERT INTO cat_insights (cat_id, mode, prompt_version, context_hash, insight_json, createdAt, updatedAt)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        f"""
+        INSERT INTO cat_insights (cat_id, mode, prompt_version, context_hash, insight_json, "createdAt", "updatedAt")
+        VALUES ({sql_params(7)})
         """,
         (
             cat_id,
@@ -790,9 +925,10 @@ def cat_insights(cat_id: int, payload: CatInsightRequest):
 def cat_profile(cat_id: int):
     conn = get_conn()
     cur = conn.cursor()
+    p = sql_param()
 
     # Load cat
-    cur.execute("SELECT id, name FROM cats WHERE id = ?", (cat_id,))
+    cur.execute(f"SELECT id, name FROM cats WHERE id = {p}", (cat_id,))
     cat = cur.fetchone()
     if cat is None:
         conn.close()
@@ -800,10 +936,10 @@ def cat_profile(cat_id: int):
 
     # Load all sightings assigned to this cat
     cur.execute(
-        """
+        f"""
         SELECT id, text, location
         FROM entries
-        WHERE cat_id = ?
+        WHERE cat_id = {p}
         ORDER BY id DESC
         """,
         (cat_id,),
@@ -881,13 +1017,14 @@ def find_matches(entry_id: int, top_k: int = 5, min_score: float = 0.15):
     """
     conn = get_conn()
     cur = conn.cursor()
+    p = sql_param()
 
     # 1) Load the base entry
     cur.execute(
-        """
+        f"""
         SELECT id, text, location
         FROM entries
-        WHERE id = ?
+        WHERE id = {p}
         """,
         (entry_id,),
     )
@@ -901,10 +1038,10 @@ def find_matches(entry_id: int, top_k: int = 5, min_score: float = 0.15):
 
     # 2) Load all other candidates
     cur.execute(
-        """
-        SELECT id, text, createdAt, nickname, location
+        f"""
+        SELECT id, text, "createdAt", nickname, location
         FROM entries
-        WHERE id != ?
+        WHERE id != {p}
         ORDER BY id DESC
         """,
         (entry_id,),
@@ -956,7 +1093,7 @@ def get_entries():
         cur = conn.cursor()
         cur.execute(
         """
-        SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url
+        SELECT id, text, "createdAt", "isFavorite", nickname, location, cat_id, photo_url
         FROM entries
         ORDER BY id DESC
         """
@@ -979,7 +1116,7 @@ def get_entries():
                 )
             )
         return result
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Failed to retrieve entries: {e}")
         raise DatabaseError(f"Failed to retrieve entries: {e}") from e
     finally:
@@ -994,12 +1131,21 @@ def create_cat(payload: CatCreate):
 
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO cats (name, createdAt) VALUES (?, ?)",
-        (name, created_at),
-    )
+
+    if is_postgres():
+        cur.execute(
+            f'INSERT INTO cats (name, "createdAt") VALUES ({sql_params(2)}) RETURNING id',
+            (name, created_at),
+        )
+        new_id = cur.fetchone()["id"]
+    else:
+        cur.execute(
+            f"INSERT INTO cats (name, createdAt) VALUES ({sql_params(2)})",
+            (name, created_at),
+        )
+        new_id = cur.lastrowid
+
     conn.commit()
-    new_id = cur.lastrowid
     conn.close()
 
     return Cat(id=new_id, name=name, createdAt=created_at)
@@ -1022,15 +1168,27 @@ def create_entry(payload: EntryCreate):
     try:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (text, created_at, 0, nickname, location, None, photo_url),
-        )
+
+        if is_postgres():
+            cur.execute(
+                f"""
+                INSERT INTO entries (text, "createdAt", "isFavorite", nickname, location, cat_id, photo_url)
+                VALUES ({sql_params(7)}) RETURNING id
+                """,
+                (text, created_at, False, nickname, location, None, photo_url),
+            )
+            new_id = cur.fetchone()["id"]
+        else:
+            cur.execute(
+                f"""
+                INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url)
+                VALUES ({sql_params(7)})
+                """,
+                (text, created_at, 0, nickname, location, None, photo_url),
+            )
+            new_id = cur.lastrowid
+
         conn.commit()
-        new_id = cur.lastrowid
         logger.info(f"Created new entry with ID {new_id}")
 
         return Entry(
@@ -1043,7 +1201,7 @@ def create_entry(payload: EntryCreate):
             cat_id=None,
             photo_url=photo_url,
         )
-    except sqlite3.Error as e:
+    except Exception as e:
         logger.error(f"Failed to create entry: {e}")
         raise DatabaseError(f"Failed to create entry: {e}") from e
     finally:
@@ -1060,12 +1218,13 @@ def toggle_favorite(entry_id: int):
     try:
         conn = get_conn()
         cur = conn.cursor()
+        p = sql_param()
 
         cur.execute(
-            """
-            SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url
+            f"""
+            SELECT id, text, "createdAt", "isFavorite", nickname, location, cat_id, photo_url
             FROM entries
-            WHERE id = ?
+            WHERE id = {p}
             """,
             (entry_id,),
         )
@@ -1073,10 +1232,14 @@ def toggle_favorite(entry_id: int):
         if row is None:
             raise ResourceNotFoundError(f"Entry with ID {entry_id} not found")
 
-        new_fav = 0 if row["isFavorite"] else 1
+        # PostgreSQL uses boolean, SQLite uses 0/1
+        if is_postgres():
+            new_fav = not row["isFavorite"]
+        else:
+            new_fav = 0 if row["isFavorite"] else 1
 
         cur.execute(
-            "UPDATE entries SET isFavorite = ? WHERE id = ?",
+            f'UPDATE entries SET "isFavorite" = {p} WHERE id = {p}',
             (new_fav, entry_id),
         )
         conn.commit()
@@ -1092,7 +1255,9 @@ def toggle_favorite(entry_id: int):
             cat_id=row["cat_id"],
             photo_url=row["photo_url"],
         )
-    except sqlite3.Error as e:
+    except ResourceNotFoundError:
+        raise
+    except Exception as e:
         logger.error(f"Failed to toggle favorite for entry {entry_id}: {e}")
         raise DatabaseError(f"Failed to update entry: {e}") from e
     finally:
@@ -1104,7 +1269,7 @@ def toggle_favorite(entry_id: int):
 def list_cats():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, name, createdAt FROM cats ORDER BY id DESC")
+    cur.execute('SELECT id, name, "createdAt" FROM cats ORDER BY id DESC')
     rows = cur.fetchall()
     conn.close()
 
@@ -1119,12 +1284,13 @@ def get_entry_analysis(entry_id: int):
     """
     conn = get_conn()
     cur = conn.cursor()
+    p = sql_param()
 
     cur.execute(
-        """
-        SELECT entry_id, summary, tags_json, sentiment, updatedAt
+        f"""
+        SELECT entry_id, summary, tags_json, sentiment, "updatedAt"
         FROM analyses
-        WHERE entry_id = ?
+        WHERE entry_id = {p}
         """,
         (entry_id,),
     )
@@ -1147,16 +1313,17 @@ def get_entry_analysis(entry_id: int):
 def assign_entry_to_cat(entry_id: int, cat_id: int):
     conn = get_conn()
     cur = conn.cursor()
+    p = sql_param()
 
     # Ensure cat exists
-    cur.execute("SELECT id FROM cats WHERE id = ?", (cat_id,))
+    cur.execute(f"SELECT id FROM cats WHERE id = {p}", (cat_id,))
     if cur.fetchone() is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Cat not found")
 
     # Ensure entry exists
     cur.execute(
-        "SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url FROM entries WHERE id = ?",
+        f'SELECT id, text, "createdAt", "isFavorite", nickname, location, cat_id, photo_url FROM entries WHERE id = {p}',
         (entry_id,),
     )
     row = cur.fetchone()
@@ -1165,12 +1332,12 @@ def assign_entry_to_cat(entry_id: int, cat_id: int):
         raise HTTPException(status_code=404, detail="Entry not found")
 
     # Assign
-    cur.execute("UPDATE entries SET cat_id = ? WHERE id = ?", (cat_id, entry_id))
+    cur.execute(f"UPDATE entries SET cat_id = {p} WHERE id = {p}", (cat_id, entry_id))
     conn.commit()
 
     # Return updated entry
     cur.execute(
-        "SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url FROM entries WHERE id = ?",
+        f'SELECT id, text, "createdAt", "isFavorite", nickname, location, cat_id, photo_url FROM entries WHERE id = {p}',
         (entry_id,),
     )
     updated = cur.fetchone()
@@ -1191,7 +1358,7 @@ def assign_entry_to_cat(entry_id: int, cat_id: int):
 @app.post("/entries/{entry_id}/analyze", response_model=EntryAnalysis)
 def analyze_and_store(entry_id: int):
     """
-    Analyze an entry by ID and persist the result in SQLite (cached AI pattern).
+    Analyze an entry by ID and persist the result (cached AI pattern).
 
     Logic:
     1) Load the entry text
@@ -1201,9 +1368,10 @@ def analyze_and_store(entry_id: int):
     """
     conn = get_conn()
     cur = conn.cursor()
+    p = sql_param()
 
     # 1) Load entry
-    cur.execute("SELECT id, text FROM entries WHERE id = ?", (entry_id,))
+    cur.execute(f"SELECT id, text FROM entries WHERE id = {p}", (entry_id,))
     entry = cur.fetchone()
     if entry is None:
         conn.close()
@@ -1214,10 +1382,10 @@ def analyze_and_store(entry_id: int):
 
     # 2) Check cache
     cur.execute(
-        """
-        SELECT entry_id, text_hash, summary, tags_json, sentiment, updatedAt
+        f"""
+        SELECT entry_id, text_hash, summary, tags_json, sentiment, "updatedAt"
         FROM analyses
-        WHERE entry_id = ?
+        WHERE entry_id = {p}
         """,
         (entry_id,),
     )
@@ -1243,15 +1411,15 @@ def analyze_and_store(entry_id: int):
     # 4) Upsert analysis
     # ON CONFLICT(entry_id) means: if entry_id already exists, update that row.
     cur.execute(
-        """
-        INSERT INTO analyses (entry_id, text_hash, summary, tags_json, sentiment, createdAt, updatedAt)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        f"""
+        INSERT INTO analyses (entry_id, text_hash, summary, tags_json, sentiment, "createdAt", "updatedAt")
+        VALUES ({sql_params(7)})
         ON CONFLICT(entry_id) DO UPDATE SET
             text_hash=excluded.text_hash,
             summary=excluded.summary,
             tags_json=excluded.tags_json,
             sentiment=excluded.sentiment,
-            updatedAt=excluded.updatedAt
+            "updatedAt"=excluded."updatedAt"
         """,
         (entry_id, current_hash, summary, tags_to_json(tags), sentiment, now, now),
     )
