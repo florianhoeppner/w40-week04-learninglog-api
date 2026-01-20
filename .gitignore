@@ -12,7 +12,10 @@ __pycache__/
 .pytest_cache/
 
 .env
-.env.*
+.env.local
+.env.production
+.env.*.local
+!.env.example
 
 build/
 dist/

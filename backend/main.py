@@ -30,6 +30,7 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from config import settings
 
 
 # -----------------------------------------------------------------------------
@@ -39,14 +40,28 @@ from pydantic import BaseModel
 app = FastAPI(title="CatAtlas API")
 
 # CORS: allows your frontend (different port/domain) to call this backend.
-# For learning projects, allow all origins. Later: restrict to your frontend domain.
+# Configured via ALLOWED_ORIGINS environment variable for security.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # OK for dev/learning
+    allow_origins=settings.allowed_origins_list,  # Configured from environment
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Log configuration on startup (sanitized, no secrets)."""
+    print(f"🚀 Starting {settings.app_name} v{settings.app_version}")
+    print(f"📊 Debug mode: {settings.debug}")
+    print(f"🗄️  Database: {DB_PATH}")
+    print(f"🔒 CORS allowed origins: {settings.allowed_origins_list}")
+    print(f"⏱️  Rate limit: {settings.rate_limit_per_minute}/min")
+    if settings.sentry_dsn:
+        print(f"📡 Sentry monitoring: enabled")
+    print(f"🔐 JWT algorithm: {settings.jwt_algorithm}")
+    print(f"⏰ Access token expiry: {settings.access_token_expire_minutes} minutes")
 
 
 @app.get("/health")
@@ -63,7 +78,8 @@ def health():
 # -----------------------------------------------------------------------------
 
 # Allow tests to point the app to a temporary DB file
-DB_PATH = Path(os.getenv("CATATLAS_DB_PATH", str(Path(__file__).parent / "learninglog.db")))
+# Backward compatible: CATATLAS_DB_PATH overrides settings.database_path
+DB_PATH = Path(os.getenv("CATATLAS_DB_PATH", settings.database_path))
 
 
 
