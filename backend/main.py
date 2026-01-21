@@ -26,10 +26,10 @@ from pathlib import Path
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Literal
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from config import settings
 
 
@@ -221,10 +221,10 @@ class EntryCreate(BaseModel):
     Client payload to create a new sighting/entry.
     Notes (text) is required. nickname/location are optional.
     """
-    text: str
-    nickname: Optional[str] = None
-    location: Optional[str] = None
-    photo_url: Optional[str] = None  # NEW
+    text: str = Field(..., min_length=1, max_length=5000)
+    nickname: Optional[str] = Field(None, max_length=100)
+    location: Optional[str] = Field(None, max_length=200)
+    photo_url: Optional[str] = Field(None, max_length=1000)
 
 class CatProfile(BaseModel):
     cat_id: int
@@ -260,7 +260,7 @@ class EntryAnalysis(BaseModel):
     updatedAt: str
 
 class CatCreate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(None, max_length=100)
 
 class Cat(BaseModel):
     id: int
@@ -291,8 +291,8 @@ class CatInsightRequest(BaseModel):
     mode controls what we generate.
     question is optional and lets the UI ask specific things later.
     """
-    mode: str  # "profile" | "care" | "update" | "risk"
-    question: Optional[str] = None
+    mode: Literal["profile", "care", "update", "risk"]
+    question: Optional[str] = Field(None, max_length=500)
 
 
 class Citation(BaseModel):
