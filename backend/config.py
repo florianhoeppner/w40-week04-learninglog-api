@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     database_path: str = "learninglog.db"
 
     # Authentication
-    jwt_secret: str
+    jwt_secret: str = "insecure-dev-key-change-in-production-min-32-chars"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
@@ -59,7 +59,7 @@ class Settings(BaseSettings):
         """
         if not self.debug:
             # Production mode - enforce strict requirements
-            if self.jwt_secret == "change-me-in-production":
+            if self.jwt_secret in ["change-me-in-production", "insecure-dev-key-change-in-production-min-32-chars"]:
                 raise ValueError(
                     "JWT_SECRET must be changed in production! "
                     "Generate a secure secret with: python3 -c \"import secrets; print(secrets.token_hex(32))\""
