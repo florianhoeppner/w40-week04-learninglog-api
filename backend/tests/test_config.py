@@ -29,7 +29,7 @@ def test_settings_load_with_defaults(monkeypatch, tmp_path):
 
 
 def test_settings_require_jwt_secret(monkeypatch, tmp_path):
-    """Test that JWT_SECRET is required and raises ValidationError if missing."""
+    """Test that JWT_SECRET has an insecure default for dev that fails in production."""
     # Create empty env file
     fake_env = tmp_path / ".env"
     fake_env.write_text("")
@@ -37,13 +37,19 @@ def test_settings_require_jwt_secret(monkeypatch, tmp_path):
     # Clear JWT_SECRET from environment
     monkeypatch.delenv("JWT_SECRET", raising=False)
 
-    # Import Settings and expect ValidationError
-    with pytest.raises(ValidationError) as exc_info:
-        from config import Settings
-        Settings(_env_file=str(fake_env))
+    # Import Settings - should work with default value
+    from config import Settings
+    settings = Settings(_env_file=str(fake_env))
 
-    # Verify the error message mentions jwt_secret
-    assert "jwt_secret" in str(exc_info.value).lower()
+    # Verify it uses the insecure default
+    assert settings.jwt_secret == "insecure-dev-key-change-in-production-min-32-chars"
+
+    # Verify production mode rejects the insecure default
+    settings.debug = False
+    with pytest.raises(ValueError) as exc_info:
+        settings.validate_production_settings()
+
+    assert "JWT_SECRET must be changed" in str(exc_info.value)
 
 
 def test_settings_validate_production_mode(monkeypatch):
