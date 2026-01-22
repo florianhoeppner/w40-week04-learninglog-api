@@ -23,8 +23,10 @@ def client(tmp_path: Path):
     db_path = tmp_path / "test.db"
     os.environ["CATATLAS_DB_PATH"] = str(db_path)
 
-    # Reload module to pick up new DB path
+    # Reload modules to pick up new environment variables
+    import config
     import main
+    importlib.reload(config)
     importlib.reload(main)
     main.init_db()
     return TestClient(main.app)
