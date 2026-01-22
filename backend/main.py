@@ -120,7 +120,7 @@ def _try_alter_table(cur, sql: str) -> None:
     Works for both SQLite and PostgreSQL.
     """
     try:
-        cur.execute(sql)
+        execute_query(cur, sql)
     except (sqlite3.OperationalError, Exception):
         # Column already exists or other error - ignore for idempotency
         pass
@@ -151,6 +151,21 @@ def sql_placeholder() -> str:
     return "%s" if settings.is_postgres else "?"
 
 
+def execute_query(cur, sql: str, params: tuple = ()):
+    """
+    Execute a SQL query with automatic placeholder conversion.
+
+    Converts ? to %s for PostgreSQL automatically.
+    This allows us to write queries with ? and have them work on both databases.
+    """
+    if settings.is_postgres and '?' in sql:
+        # Replace ? with %s for PostgreSQL
+        sql = sql.replace('?', '%s')
+
+    cur.execute(sql, params)
+    return cur
+
+
 def init_db() -> None:
     """
     Create required tables if they don't exist.
@@ -175,7 +190,7 @@ def init_db() -> None:
     int_type = "INT" if is_postgres else "INTEGER"
 
     # --- Entries table (sightings) ---
-    cur.execute(
+    execute_query(cur, 
         f"""
         CREATE TABLE IF NOT EXISTS entries (
             id {id_type},
@@ -199,7 +214,7 @@ def init_db() -> None:
         _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN photo_url TEXT")
 
     # --- Analyses table ---
-    cur.execute(
+    execute_query(cur, 
         f"""
         CREATE TABLE IF NOT EXISTS analyses (
             entry_id {int_type} PRIMARY KEY,
@@ -215,7 +230,7 @@ def init_db() -> None:
     )
 
     # --- Cat insights table ---
-    cur.execute(
+    execute_query(cur, 
         f"""
         CREATE TABLE IF NOT EXISTS cat_insights (
             id {id_type},
@@ -233,7 +248,7 @@ def init_db() -> None:
     )
 
     # --- Cats table ---
-    cur.execute(
+    execute_query(cur, 
         f"""
         CREATE TABLE IF NOT EXISTS cats (
             id {id_type},
@@ -544,7 +559,7 @@ def retrieve_cat_sightings(cur: sqlite3.Cursor, cat_id: int, limit: int = 10) ->
     Retrieve sightings for a cat (newest first).
     Keep it simple: we’ll use the newest + keyword relevance if question exists later.
     """
-    cur.execute(
+    execute_query(cur, 
         """
         SELECT id, text, location, createdAt
         FROM entries
@@ -691,7 +706,7 @@ def cat_insights(cat_id: int, payload: CatInsightRequest):
     cur = conn.cursor()
 
     # Ensure cat exists
-    cur.execute("SELECT id FROM cats WHERE id = ?", (cat_id,))
+    execute_query(cur, "SELECT id FROM cats WHERE id = ?", (cat_id,))
     if cur.fetchone() is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Cat not found")
@@ -712,7 +727,7 @@ def cat_insights(cat_id: int, payload: CatInsightRequest):
     context_hash = make_context_hash(context_parts)
 
     # Try cache
-    cur.execute(
+    execute_query(cur, 
         """
         SELECT insight_json
         FROM cat_insights
@@ -735,7 +750,7 @@ def cat_insights(cat_id: int, payload: CatInsightRequest):
     )
 
     now = datetime.utcnow().isoformat() + "Z"
-    cur.execute(
+    execute_query(cur, 
         """
         INSERT INTO cat_insights (cat_id, mode, prompt_version, context_hash, insight_json, createdAt, updatedAt)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -768,14 +783,14 @@ def cat_profile(cat_id: int):
     cur = conn.cursor()
 
     # Load cat
-    cur.execute("SELECT id, name FROM cats WHERE id = ?", (cat_id,))
+    execute_query(cur, "SELECT id, name FROM cats WHERE id = ?", (cat_id,))
     cat = cur.fetchone()
     if cat is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Cat not found")
 
     # Load all sightings assigned to this cat
-    cur.execute(
+    execute_query(cur, 
         """
         SELECT id, text, location
         FROM entries
@@ -859,7 +874,7 @@ def find_matches(entry_id: int, top_k: int = 5, min_score: float = 0.15):
     cur = conn.cursor()
 
     # 1) Load the base entry
-    cur.execute(
+    execute_query(cur, 
         """
         SELECT id, text, location
         FROM entries
@@ -876,7 +891,7 @@ def find_matches(entry_id: int, top_k: int = 5, min_score: float = 0.15):
     base_location = base["location"] or ""
 
     # 2) Load all other candidates
-    cur.execute(
+    execute_query(cur, 
         """
         SELECT id, text, createdAt, nickname, location
         FROM entries
@@ -928,7 +943,7 @@ def get_entries():
     """
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
+    execute_query(cur, 
     """
     SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url
     FROM entries
@@ -965,13 +980,13 @@ def create_cat(payload: CatCreate):
 
     ph = sql_placeholder()
     if settings.is_postgres:
-        cur.execute(
+        execute_query(cur, 
             f"INSERT INTO cats (name, createdAt) VALUES ({ph}, {ph}) RETURNING id",
             (name, created_at),
         )
         new_id = cur.fetchone()['id']
     else:
-        cur.execute(
+        execute_query(cur, 
             f"INSERT INTO cats (name, createdAt) VALUES ({ph}, {ph})",
             (name, created_at),
         )
@@ -1000,7 +1015,7 @@ def create_entry(payload: EntryCreate):
 
     ph = sql_placeholder()
     if settings.is_postgres:
-        cur.execute(
+        execute_query(cur, 
             f"""
             INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url)
             VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
@@ -1010,7 +1025,7 @@ def create_entry(payload: EntryCreate):
         )
         new_id = cur.fetchone()['id']
     else:
-        cur.execute(
+        execute_query(cur, 
             f"""
             INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url)
             VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
@@ -1042,7 +1057,7 @@ def toggle_favorite(entry_id: int):
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute(
+    execute_query(cur, 
         """
         SELECT id, text, createdAt, isFavorite, nickname, location
         FROM entries
@@ -1057,7 +1072,7 @@ def toggle_favorite(entry_id: int):
 
     new_fav = 0 if row["isFavorite"] else 1
 
-    cur.execute(
+    execute_query(cur, 
         "UPDATE entries SET isFavorite = ? WHERE id = ?",
         (new_fav, entry_id),
     )
@@ -1078,7 +1093,7 @@ def toggle_favorite(entry_id: int):
 def list_cats():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, name, createdAt FROM cats ORDER BY id DESC")
+    execute_query(cur, "SELECT id, name, createdAt FROM cats ORDER BY id DESC")
     rows = cur.fetchall()
     conn.close()
 
@@ -1094,7 +1109,7 @@ def get_entry_analysis(entry_id: int):
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute(
+    execute_query(cur, 
         """
         SELECT entry_id, summary, tags_json, sentiment, updatedAt
         FROM analyses
@@ -1123,13 +1138,13 @@ def assign_entry_to_cat(entry_id: int, cat_id: int):
     cur = conn.cursor()
 
     # Ensure cat exists
-    cur.execute("SELECT id FROM cats WHERE id = ?", (cat_id,))
+    execute_query(cur, "SELECT id FROM cats WHERE id = ?", (cat_id,))
     if cur.fetchone() is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Cat not found")
 
     # Ensure entry exists
-    cur.execute(
+    execute_query(cur, 
         "SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url FROM entries WHERE id = ?",
         (entry_id,),
     )
@@ -1139,11 +1154,11 @@ def assign_entry_to_cat(entry_id: int, cat_id: int):
         raise HTTPException(status_code=404, detail="Entry not found")
 
     # Assign
-    cur.execute("UPDATE entries SET cat_id = ? WHERE id = ?", (cat_id, entry_id))
+    execute_query(cur, "UPDATE entries SET cat_id = ? WHERE id = ?", (cat_id, entry_id))
     conn.commit()
 
     # Return updated entry
-    cur.execute(
+    execute_query(cur, 
         "SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url FROM entries WHERE id = ?",
         (entry_id,),
     )
@@ -1177,7 +1192,7 @@ def analyze_and_store(entry_id: int):
     cur = conn.cursor()
 
     # 1) Load entry
-    cur.execute("SELECT id, text FROM entries WHERE id = ?", (entry_id,))
+    execute_query(cur, "SELECT id, text FROM entries WHERE id = ?", (entry_id,))
     entry = cur.fetchone()
     if entry is None:
         conn.close()
@@ -1187,7 +1202,7 @@ def analyze_and_store(entry_id: int):
     current_hash = text_to_hash(text)
 
     # 2) Check cache
-    cur.execute(
+    execute_query(cur, 
         """
         SELECT entry_id, text_hash, summary, tags_json, sentiment, updatedAt
         FROM analyses
@@ -1216,7 +1231,7 @@ def analyze_and_store(entry_id: int):
 
     # 4) Upsert analysis
     # ON CONFLICT(entry_id) means: if entry_id already exists, update that row.
-    cur.execute(
+    execute_query(cur, 
         """
         INSERT INTO analyses (entry_id, text_hash, summary, tags_json, sentiment, createdAt, updatedAt)
         VALUES (?, ?, ?, ?, ?, ?, ?)
