@@ -20,7 +20,8 @@ class Settings(BaseSettings):
     debug: bool = False
 
     # Database
-    database_path: str = "learninglog.db"
+    database_url: Optional[str] = None  # PostgreSQL connection string
+    database_path: str = "learninglog.db"  # SQLite fallback for local dev
 
     # Authentication
     jwt_secret: str = "insecure-dev-key-change-in-production-min-32-chars"
@@ -50,6 +51,11 @@ class Settings(BaseSettings):
     def allowed_origins_list(self) -> List[str]:
         """Parse allowed_origins as a list."""
         return [origin.strip() for origin in self.allowed_origins.split(",") if origin.strip()]
+
+    @property
+    def is_postgres(self) -> bool:
+        """Check if using PostgreSQL (vs SQLite)."""
+        return self.database_url is not None and self.database_url.startswith("postgres")
 
     def validate_production_settings(self):
         """Validate critical production settings.
