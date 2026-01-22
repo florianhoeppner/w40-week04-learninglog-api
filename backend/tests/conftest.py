@@ -16,6 +16,7 @@ def isolate_environment(monkeypatch, tmp_path):
     - Creates a temporary empty .env file
     - Clears all environment variables that might affect config
     - Each test must explicitly set the variables it needs
+    - Sets DEBUG=True by default for test environment
     """
     # Create empty .env in temp dir
     temp_env = tmp_path / ".env"
@@ -38,3 +39,6 @@ def isolate_environment(monkeypatch, tmp_path):
 
     for var in env_vars_to_clear:
         monkeypatch.delenv(var, raising=False)
+
+    # Set DEBUG=True for tests to avoid production validation
+    monkeypatch.setenv("DEBUG", "True")
