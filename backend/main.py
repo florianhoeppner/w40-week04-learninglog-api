@@ -26,11 +26,19 @@ from pathlib import Path
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Union
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from config import settings
+
+# PostgreSQL support
+try:
+    import psycopg2
+    import psycopg2.extras
+    POSTGRES_AVAILABLE = True
+except ImportError:
+    POSTGRES_AVAILABLE = False
 
 
 # -----------------------------------------------------------------------------
@@ -55,7 +63,10 @@ async def startup_event():
     """Log configuration on startup (sanitized, no secrets)."""
     print(f"🚀 Starting {settings.app_name} v{settings.app_version}")
     print(f"📊 Debug mode: {settings.debug}")
-    print(f"🗄️  Database: {DB_PATH}")
+    if settings.is_postgres:
+        print(f"🗄️  Database: PostgreSQL (production)")
+    else:
+        print(f"🗄️  Database: SQLite at {DB_PATH}")
     print(f"🔒 CORS allowed origins: {settings.allowed_origins_list}")
     print(f"⏱️  Rate limit: {settings.rate_limit_per_minute}/min")
     if settings.sentry_dsn:
@@ -74,7 +85,7 @@ def health():
 
 
 # -----------------------------------------------------------------------------
-# SQLite configuration
+# Database configuration (SQLite or PostgreSQL)
 # -----------------------------------------------------------------------------
 
 # Allow tests to point the app to a temporary DB file
@@ -83,32 +94,76 @@ DB_PATH = Path(os.getenv("CATATLAS_DB_PATH", settings.database_path))
 
 
 
-def get_conn() -> sqlite3.Connection:
+def get_conn() -> Union[sqlite3.Connection, 'psycopg2.extensions.connection']:
     """
-    Open a SQLite connection.
+    Open a database connection (SQLite or PostgreSQL).
 
-    - check_same_thread=False:
-        FastAPI may handle requests in different threads.
-        SQLite by default restricts a connection to the creating thread.
-    - row_factory=sqlite3.Row:
-        Allows dict-like access row["column_name"].
+    Returns SQLite connection for local dev/testing,
+    or PostgreSQL connection for production.
     """
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+    if settings.is_postgres:
+        if not POSTGRES_AVAILABLE:
+            raise RuntimeError("PostgreSQL driver (psycopg2) not installed")
+        conn = psycopg2.connect(settings.database_url)
+        # Use RealDictCursor for dict-like access (similar to sqlite3.Row)
+        return conn
+    else:
+        # SQLite for local development and tests
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
 
 
-def _try_alter_table(cur: sqlite3.Cursor, sql: str) -> None:
+def _try_alter_table(cur, sql: str) -> None:
     """
-    SQLite doesn't support 'ADD COLUMN IF NOT EXISTS' in older versions.
-    So we attempt ALTER TABLE and ignore errors like 'duplicate column name'.
+    Attempt ALTER TABLE and ignore errors if column already exists.
+    Works for both SQLite and PostgreSQL.
     """
     try:
-        cur.execute(sql)
-    except sqlite3.OperationalError:
-        # Example: duplicate column name => column already exists
-        # We intentionally ignore it to make init_db idempotent.
+        execute_query(cur, sql)
+    except (sqlite3.OperationalError, Exception):
+        # Column already exists or other error - ignore for idempotency
         pass
+
+
+def get_cursor(conn):
+    """Get a cursor with appropriate factory for the database type."""
+    if settings.is_postgres:
+        return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    else:
+        return conn.cursor()
+
+
+def get_last_insert_id(cur, conn) -> int:
+    """Get the last inserted row ID in a database-agnostic way."""
+    if settings.is_postgres:
+        # PostgreSQL: need to use RETURNING or currval
+        # This assumes the cursor just executed an INSERT with RETURNING
+        result = cur.fetchone()
+        return result['id'] if result else None
+    else:
+        # SQLite
+        return cur.lastrowid
+
+
+def sql_placeholder() -> str:
+    """Return the correct SQL placeholder for the current database."""
+    return "%s" if settings.is_postgres else "?"
+
+
+def execute_query(cur, sql: str, params: tuple = ()):
+    """
+    Execute a SQL query with automatic placeholder conversion.
+
+    Converts ? to %s for PostgreSQL automatically.
+    This allows us to write queries with ? and have them work on both databases.
+    """
+    if settings.is_postgres and '?' in sql:
+        # Replace ? with %s for PostgreSQL
+        sql = sql.replace('?', '%s')
+
+    cur.execute(sql, params)
+    return cur
 
 
 def init_db() -> None:
@@ -116,47 +171,53 @@ def init_db() -> None:
     Create required tables if they don't exist.
     Also performs a minimal "migration" step for older DB files
     (adds new columns if missing).
+
+    Works with both SQLite (local) and PostgreSQL (production).
     """
     conn = get_conn()
-    cur = conn.cursor()
+    is_postgres = settings.is_postgres
+
+    # For PostgreSQL, we need RealDictCursor for dict-like access
+    if is_postgres:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    else:
+        cur = conn.cursor()
+
+    # Choose SQL syntax based on database type
+    # SQLite uses: INTEGER PRIMARY KEY AUTOINCREMENT
+    # PostgreSQL uses: SERIAL PRIMARY KEY
+    id_type = "SERIAL PRIMARY KEY" if is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    int_type = "INT" if is_postgres else "INTEGER"
 
     # --- Entries table (sightings) ---
-    # Keep this as your source-of-truth domain data.
-    # ------------------------------------------------------------
-    # Table: entries (existing) — treat as "sightings"
-    # ------------------------------------------------------------
-    cur.execute(
-        """
+    execute_query(cur, 
+        f"""
         CREATE TABLE IF NOT EXISTS entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_type},
             text TEXT NOT NULL,
             createdAt TEXT NOT NULL,
-            isFavorite INTEGER NOT NULL DEFAULT 0,
+            isFavorite {int_type} NOT NULL DEFAULT 0,
             nickname TEXT,
-            location TEXT
+            location TEXT,
+            cat_id {int_type},
+            photo_url TEXT
         )
         """
     )
 
-    # If entries table existed before nickname/location were added,
-    # these ALTER statements will add them (or no-op if already there).
-        # Minimal migrations for older DBs (safe no-op if already exists)
-    _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN nickname TEXT")
-    _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN location TEXT")
-    # NEW: link a sighting to a cat identity
-    _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN cat_id INTEGER")
-    # NEW: photo dimension (for now: just a URL string)
-    _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN photo_url TEXT")
+    # For SQLite, add columns if they don't exist (for backward compatibility)
+    # PostgreSQL: columns already in CREATE TABLE above
+    if not is_postgres:
+        _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN nickname TEXT")
+        _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN location TEXT")
+        _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN cat_id INTEGER")
+        _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN photo_url TEXT")
 
     # --- Analyses table ---
-    # Derived data: generated from entry text and cached/persisted.
-    # One analysis per entry_id (simple, sufficient for learning).
-
-
-    cur.execute(
-        """
+    execute_query(cur, 
+        f"""
         CREATE TABLE IF NOT EXISTS analyses (
-            entry_id INTEGER PRIMARY KEY,
+            entry_id {int_type} PRIMARY KEY,
             text_hash TEXT NOT NULL,
             summary TEXT NOT NULL,
             tags_json TEXT NOT NULL,
@@ -168,13 +229,12 @@ def init_db() -> None:
         """
     )
 
-    # --- Cats table + insights (new) ---
-    # Table: cat_insights (new) — cached GenAI outputs per cat + mode + context hash
-    cur.execute(
-        """
+    # --- Cat insights table ---
+    execute_query(cur, 
+        f"""
         CREATE TABLE IF NOT EXISTS cat_insights (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cat_id INTEGER NOT NULL,
+            id {id_type},
+            cat_id {int_type} NOT NULL,
             mode TEXT NOT NULL,
             prompt_version TEXT NOT NULL,
             context_hash TEXT NOT NULL,
@@ -187,18 +247,17 @@ def init_db() -> None:
         """
     )
 
-    # ------------------------------------------------------------
-    # Table: cats (new) — explicit identity concept
-    # ------------------------------------------------------------
-    cur.execute(
-        """
+    # --- Cats table ---
+    execute_query(cur, 
+        f"""
         CREATE TABLE IF NOT EXISTS cats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,                -- user-assigned name (optional)
+            id {id_type},
+            name TEXT,
             createdAt TEXT NOT NULL
         )
         """
     )
+
     conn.commit()
     conn.close()
 
@@ -500,7 +559,7 @@ def retrieve_cat_sightings(cur: sqlite3.Cursor, cat_id: int, limit: int = 10) ->
     Retrieve sightings for a cat (newest first).
     Keep it simple: we’ll use the newest + keyword relevance if question exists later.
     """
-    cur.execute(
+    execute_query(cur, 
         """
         SELECT id, text, location, createdAt
         FROM entries
@@ -647,7 +706,7 @@ def cat_insights(cat_id: int, payload: CatInsightRequest):
     cur = conn.cursor()
 
     # Ensure cat exists
-    cur.execute("SELECT id FROM cats WHERE id = ?", (cat_id,))
+    execute_query(cur, "SELECT id FROM cats WHERE id = ?", (cat_id,))
     if cur.fetchone() is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Cat not found")
@@ -668,7 +727,7 @@ def cat_insights(cat_id: int, payload: CatInsightRequest):
     context_hash = make_context_hash(context_parts)
 
     # Try cache
-    cur.execute(
+    execute_query(cur, 
         """
         SELECT insight_json
         FROM cat_insights
@@ -691,7 +750,7 @@ def cat_insights(cat_id: int, payload: CatInsightRequest):
     )
 
     now = datetime.utcnow().isoformat() + "Z"
-    cur.execute(
+    execute_query(cur, 
         """
         INSERT INTO cat_insights (cat_id, mode, prompt_version, context_hash, insight_json, createdAt, updatedAt)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -724,14 +783,14 @@ def cat_profile(cat_id: int):
     cur = conn.cursor()
 
     # Load cat
-    cur.execute("SELECT id, name FROM cats WHERE id = ?", (cat_id,))
+    execute_query(cur, "SELECT id, name FROM cats WHERE id = ?", (cat_id,))
     cat = cur.fetchone()
     if cat is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Cat not found")
 
     # Load all sightings assigned to this cat
-    cur.execute(
+    execute_query(cur, 
         """
         SELECT id, text, location
         FROM entries
@@ -815,7 +874,7 @@ def find_matches(entry_id: int, top_k: int = 5, min_score: float = 0.15):
     cur = conn.cursor()
 
     # 1) Load the base entry
-    cur.execute(
+    execute_query(cur, 
         """
         SELECT id, text, location
         FROM entries
@@ -832,7 +891,7 @@ def find_matches(entry_id: int, top_k: int = 5, min_score: float = 0.15):
     base_location = base["location"] or ""
 
     # 2) Load all other candidates
-    cur.execute(
+    execute_query(cur, 
         """
         SELECT id, text, createdAt, nickname, location
         FROM entries
@@ -884,7 +943,7 @@ def get_entries():
     """
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
+    execute_query(cur, 
     """
     SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url
     FROM entries
@@ -917,13 +976,23 @@ def create_cat(payload: CatCreate):
     name = payload.name.strip() if payload.name and payload.name.strip() else None
 
     conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO cats (name, createdAt) VALUES (?, ?)",
-        (name, created_at),
-    )
+    cur = get_cursor(conn)
+
+    ph = sql_placeholder()
+    if settings.is_postgres:
+        execute_query(cur, 
+            f"INSERT INTO cats (name, createdAt) VALUES ({ph}, {ph}) RETURNING id",
+            (name, created_at),
+        )
+        new_id = cur.fetchone()['id']
+    else:
+        execute_query(cur, 
+            f"INSERT INTO cats (name, createdAt) VALUES ({ph}, {ph})",
+            (name, created_at),
+        )
+        new_id = cur.lastrowid
+
     conn.commit()
-    new_id = cur.lastrowid
     conn.close()
 
     return Cat(id=new_id, name=name, createdAt=created_at)
@@ -942,16 +1011,30 @@ def create_entry(payload: EntryCreate):
     photo_url = payload.photo_url.strip() if payload.photo_url and payload.photo_url.strip() else None
 
     conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (text, created_at, 0, nickname, location, None, photo_url),
-    )
+    cur = get_cursor(conn)
+
+    ph = sql_placeholder()
+    if settings.is_postgres:
+        execute_query(cur, 
+            f"""
+            INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+            RETURNING id
+            """,
+            (text, created_at, 0, nickname, location, None, photo_url),
+        )
+        new_id = cur.fetchone()['id']
+    else:
+        execute_query(cur, 
+            f"""
+            INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+            """,
+            (text, created_at, 0, nickname, location, None, photo_url),
+        )
+        new_id = cur.lastrowid
+
     conn.commit()
-    new_id = cur.lastrowid
     conn.close()
 
     return Entry(
@@ -974,7 +1057,7 @@ def toggle_favorite(entry_id: int):
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute(
+    execute_query(cur, 
         """
         SELECT id, text, createdAt, isFavorite, nickname, location
         FROM entries
@@ -989,7 +1072,7 @@ def toggle_favorite(entry_id: int):
 
     new_fav = 0 if row["isFavorite"] else 1
 
-    cur.execute(
+    execute_query(cur, 
         "UPDATE entries SET isFavorite = ? WHERE id = ?",
         (new_fav, entry_id),
     )
@@ -1010,7 +1093,7 @@ def toggle_favorite(entry_id: int):
 def list_cats():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, name, createdAt FROM cats ORDER BY id DESC")
+    execute_query(cur, "SELECT id, name, createdAt FROM cats ORDER BY id DESC")
     rows = cur.fetchall()
     conn.close()
 
@@ -1026,7 +1109,7 @@ def get_entry_analysis(entry_id: int):
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute(
+    execute_query(cur, 
         """
         SELECT entry_id, summary, tags_json, sentiment, updatedAt
         FROM analyses
@@ -1055,13 +1138,13 @@ def assign_entry_to_cat(entry_id: int, cat_id: int):
     cur = conn.cursor()
 
     # Ensure cat exists
-    cur.execute("SELECT id FROM cats WHERE id = ?", (cat_id,))
+    execute_query(cur, "SELECT id FROM cats WHERE id = ?", (cat_id,))
     if cur.fetchone() is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Cat not found")
 
     # Ensure entry exists
-    cur.execute(
+    execute_query(cur, 
         "SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url FROM entries WHERE id = ?",
         (entry_id,),
     )
@@ -1071,11 +1154,11 @@ def assign_entry_to_cat(entry_id: int, cat_id: int):
         raise HTTPException(status_code=404, detail="Entry not found")
 
     # Assign
-    cur.execute("UPDATE entries SET cat_id = ? WHERE id = ?", (cat_id, entry_id))
+    execute_query(cur, "UPDATE entries SET cat_id = ? WHERE id = ?", (cat_id, entry_id))
     conn.commit()
 
     # Return updated entry
-    cur.execute(
+    execute_query(cur, 
         "SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url FROM entries WHERE id = ?",
         (entry_id,),
     )
@@ -1109,7 +1192,7 @@ def analyze_and_store(entry_id: int):
     cur = conn.cursor()
 
     # 1) Load entry
-    cur.execute("SELECT id, text FROM entries WHERE id = ?", (entry_id,))
+    execute_query(cur, "SELECT id, text FROM entries WHERE id = ?", (entry_id,))
     entry = cur.fetchone()
     if entry is None:
         conn.close()
@@ -1119,7 +1202,7 @@ def analyze_and_store(entry_id: int):
     current_hash = text_to_hash(text)
 
     # 2) Check cache
-    cur.execute(
+    execute_query(cur, 
         """
         SELECT entry_id, text_hash, summary, tags_json, sentiment, updatedAt
         FROM analyses
@@ -1148,7 +1231,7 @@ def analyze_and_store(entry_id: int):
 
     # 4) Upsert analysis
     # ON CONFLICT(entry_id) means: if entry_id already exists, update that row.
-    cur.execute(
+    execute_query(cur, 
         """
         INSERT INTO analyses (entry_id, text_hash, summary, tags_json, sentiment, createdAt, updatedAt)
         VALUES (?, ?, ?, ?, ?, ?, ?)
