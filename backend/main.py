@@ -704,7 +704,7 @@ def cat_insights(cat_id: int, payload: CatInsightRequest):
         raise HTTPException(status_code=400, detail="mode must be one of: profile, care, update, risk")
 
     conn = get_conn()
-    cur = conn.cursor()
+    cur = get_cursor(conn)
 
     # Ensure cat exists
     execute_query(cur, "SELECT id FROM cats WHERE id = ?", (cat_id,))
@@ -781,7 +781,7 @@ def health():
 @app.get("/cats/{cat_id}/profile", response_model=CatProfile)
 def cat_profile(cat_id: int):
     conn = get_conn()
-    cur = conn.cursor()
+    cur = get_cursor(conn)
 
     # Load cat
     execute_query(cur, "SELECT id, name FROM cats WHERE id = ?", (cat_id,))
@@ -872,7 +872,7 @@ def find_matches(entry_id: int, top_k: int = 5, min_score: float = 0.15):
     NOTE: This is *not* identity proof. It's a suggestion list.
     """
     conn = get_conn()
-    cur = conn.cursor()
+    cur = get_cursor(conn)
 
     # 1) Load the base entry
     execute_query(cur, 
@@ -943,7 +943,7 @@ def get_entries():
     Return all entries, newest first.
     """
     conn = get_conn()
-    cur = conn.cursor()
+    cur = get_cursor(conn)
     execute_query(cur, 
     """
     SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url
@@ -1056,7 +1056,7 @@ def toggle_favorite(entry_id: int):
     Toggle isFavorite for an entry.
     """
     conn = get_conn()
-    cur = conn.cursor()
+    cur = get_cursor(conn)
 
     execute_query(cur, 
         """
@@ -1093,7 +1093,7 @@ def toggle_favorite(entry_id: int):
 @app.get("/cats", response_model=List[Cat])
 def list_cats():
     conn = get_conn()
-    cur = conn.cursor()
+    cur = get_cursor(conn)
     execute_query(cur, "SELECT id, name, createdAt FROM cats ORDER BY id DESC")
     rows = cur.fetchall()
     conn.close()
@@ -1108,7 +1108,7 @@ def get_entry_analysis(entry_id: int):
     If it doesn't exist yet, return 404.
     """
     conn = get_conn()
-    cur = conn.cursor()
+    cur = get_cursor(conn)
 
     execute_query(cur, 
         """
@@ -1136,7 +1136,7 @@ def get_entry_analysis(entry_id: int):
 @app.post("/entries/{entry_id}/assign/{cat_id}", response_model=Entry)
 def assign_entry_to_cat(entry_id: int, cat_id: int):
     conn = get_conn()
-    cur = conn.cursor()
+    cur = get_cursor(conn)
 
     # Ensure cat exists
     execute_query(cur, "SELECT id FROM cats WHERE id = ?", (cat_id,))
@@ -1190,7 +1190,7 @@ def analyze_and_store(entry_id: int):
     4) Else compute baseline analysis -> upsert into DB -> return new result
     """
     conn = get_conn()
-    cur = conn.cursor()
+    cur = get_cursor(conn)
 
     # 1) Load entry
     execute_query(cur, "SELECT id, text FROM entries WHERE id = ?", (entry_id,))
