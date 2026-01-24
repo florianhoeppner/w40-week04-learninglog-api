@@ -1,3 +1,4 @@
+# Backend dependencies for FastAPI + PostgreSQL
 fastapi
 uvicorn[standard]
 python-dotenv==1.0.0
