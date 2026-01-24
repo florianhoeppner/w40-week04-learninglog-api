@@ -189,8 +189,19 @@ def init_db() -> None:
     id_type = "SERIAL PRIMARY KEY" if is_postgres else "INTEGER PRIMARY KEY AUTOINCREMENT"
     int_type = "INT" if is_postgres else "INTEGER"
 
-    # --- Entries table (sightings) ---
-    execute_query(cur, 
+    # --- Cats table (create first - no dependencies) ---
+    execute_query(cur,
+        f"""
+        CREATE TABLE IF NOT EXISTS cats (
+            id {id_type},
+            name TEXT,
+            createdAt TEXT NOT NULL
+        )
+        """
+    )
+
+    # --- Entries table (sightings) - depends on cats ---
+    execute_query(cur,
         f"""
         CREATE TABLE IF NOT EXISTS entries (
             id {id_type},
@@ -200,7 +211,8 @@ def init_db() -> None:
             nickname TEXT,
             location TEXT,
             cat_id {int_type},
-            photo_url TEXT
+            photo_url TEXT,
+            FOREIGN KEY(cat_id) REFERENCES cats(id) ON DELETE SET NULL
         )
         """
     )
@@ -213,8 +225,8 @@ def init_db() -> None:
         _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN cat_id INTEGER")
         _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN photo_url TEXT")
 
-    # --- Analyses table ---
-    execute_query(cur, 
+    # --- Analyses table - depends on entries ---
+    execute_query(cur,
         f"""
         CREATE TABLE IF NOT EXISTS analyses (
             entry_id {int_type} PRIMARY KEY,
@@ -229,8 +241,8 @@ def init_db() -> None:
         """
     )
 
-    # --- Cat insights table ---
-    execute_query(cur, 
+    # --- Cat insights table - depends on cats ---
+    execute_query(cur,
         f"""
         CREATE TABLE IF NOT EXISTS cat_insights (
             id {id_type},
@@ -243,17 +255,6 @@ def init_db() -> None:
             updatedAt TEXT NOT NULL,
             UNIQUE(cat_id, mode, prompt_version, context_hash),
             FOREIGN KEY(cat_id) REFERENCES cats(id) ON DELETE CASCADE
-        )
-        """
-    )
-
-    # --- Cats table ---
-    execute_query(cur, 
-        f"""
-        CREATE TABLE IF NOT EXISTS cats (
-            id {id_type},
-            name TEXT,
-            createdAt TEXT NOT NULL
         )
         """
     )
