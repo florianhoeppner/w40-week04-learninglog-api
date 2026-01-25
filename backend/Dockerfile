@@ -7,18 +7,16 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+# CRITICAL: Force cache invalidation - change this value to force rebuild
+RUN echo "Build timestamp: 2026-01-25-16:50:00" > /tmp/cachebust.txt
+
 # Install dependencies
 # Note: psycopg2-binary is used for simplicity. For production at scale,
 # consider using psycopg2 with: apt-get install -y libpq-dev gcc
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Force cache invalidation for code changes
-# Build timestamp: 2026-01-24_cursor_fix_v2
-ARG CACHEBUST=2
-RUN echo "Cache bust: $CACHEBUST"
-
-# Copy app
+# Copy app (this should NOT be cached now)
 COPY . /app
 
 # Expose port (Railway uses $PORT env var, but default to 8000 for local testing)
