@@ -1,5 +1,6 @@
 """
-main.py — CatAtlas / Learning Log backend (FastAPI + SQLite)
+main.py — CatAtlas / Learning Log backend (FastAPI + PostgreSQL/SQLite)
+Version: 1.0.1 (2026-01-25 - PostgreSQL cursor fix)
 
 This file includes:
 - SQLite persistence for sightings (entries)
