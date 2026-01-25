@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "CatAtlas API"
-    app_version: str = "1.0.1"
+    app_version: str = "1.0.1"  # PostgreSQL cursor fix deployed
     debug: bool = False
 
     # Database
