@@ -14,8 +14,9 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # Force cache invalidation for code changes
-# Build timestamp: 2026-01-24_cursor_fix
-ARG CACHEBUST=1
+# Build timestamp: 2026-01-24_cursor_fix_v2
+ARG CACHEBUST=2
+RUN echo "Cache bust: $CACHEBUST"
 
 # Copy app
 COPY . /app
