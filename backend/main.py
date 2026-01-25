@@ -1,6 +1,6 @@
 """
 main.py — CatAtlas / Learning Log backend (FastAPI + PostgreSQL/SQLite)
-Version: 1.0.1 (2026-01-25 - PostgreSQL cursor fix)
+Version: 1.0.2 (2026-01-25 - Fix PostgreSQL column name casing)
 
 This file includes:
 - SQLite persistence for sightings (entries)
@@ -133,6 +133,30 @@ def get_cursor(conn):
         return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     else:
         return conn.cursor()
+
+
+def row_get(row, key):
+    """
+    Get a value from a database row, handling PostgreSQL lowercase column names.
+
+    PostgreSQL lowercases unquoted column names, so 'createdAt' becomes 'createdat'.
+    This helper tries both the original key and lowercase version.
+    """
+    # Try exact key first (works for SQLite and quoted PostgreSQL columns)
+    try:
+        return row[key]
+    except KeyError:
+        pass
+
+    # Try lowercase for PostgreSQL unquoted columns
+    lower_key = key.lower()
+    try:
+        return row[lower_key]
+    except KeyError:
+        pass
+
+    # If neither works, raise with original key for clearer error message
+    raise KeyError(key)
 
 
 def get_last_insert_id(cur, conn) -> int:
@@ -667,7 +691,7 @@ def generate_cat_insight_stub(
                 entry_id=s["id"],
                 quote=excerpt(s["text"]),
                 location=s["location"],
-                createdAt=s["createdAt"],
+                createdAt=row_get(s, "createdAt"),
             )
         )
 
@@ -723,7 +747,7 @@ def cat_insights(cat_id: int, payload: CatInsightRequest):
     context_parts: list[str] = []
     for s in sightings:
         context_parts.append(
-            f"id={s['id']} createdAt={s['createdAt']} location={s['location'] or ''}\ntext={s['text']}"
+            f"id={s['id']} createdAt={row_get(s, 'createdAt')} location={s['location'] or ''}\ntext={s['text']}"
         )
 
     context_hash = make_context_hash(context_parts)
@@ -929,7 +953,7 @@ def find_matches(entry_id: int, top_k: int = 5, min_score: float = 0.15):
                     candidate_nickname=r["nickname"],
                     candidate_location=r["location"],
                     candidate_text=r["text"],
-                    candidate_createdAt=r["createdAt"],
+                    candidate_createdAt=row_get(r, "createdAt"),
                 )
             )
 
@@ -961,8 +985,8 @@ def get_entries():
             Entry(
                 id=r["id"],
                 text=r["text"],
-                createdAt=r["createdAt"],
-                isFavorite=bool(r["isFavorite"]),
+                createdAt=row_get(r, "createdAt"),
+                isFavorite=bool(row_get(r, "isFavorite")),
                 nickname=r["nickname"],
                 location=r["location"],
                 cat_id=r["cat_id"],
@@ -1072,7 +1096,7 @@ def toggle_favorite(entry_id: int):
         conn.close()
         raise HTTPException(status_code=404, detail="Entry not found")
 
-    new_fav = 0 if row["isFavorite"] else 1
+    new_fav = 0 if row_get(row, "isFavorite") else 1
 
     execute_query(cur, 
         "UPDATE entries SET isFavorite = ? WHERE id = ?",
@@ -1084,7 +1108,7 @@ def toggle_favorite(entry_id: int):
     return Entry(
         id=row["id"],
         text=row["text"],
-        createdAt=row["createdAt"],
+        createdAt=row_get(row, "createdAt"),
         isFavorite=bool(new_fav),
         nickname=row["nickname"],
         location=row["location"],
@@ -1099,7 +1123,7 @@ def list_cats():
     rows = cur.fetchall()
     conn.close()
 
-    return [Cat(id=r["id"], name=r["name"], createdAt=r["createdAt"]) for r in rows]
+    return [Cat(id=r["id"], name=r["name"], createdAt=row_get(r, "createdAt")) for r in rows]
 
 
 @app.get("/entries/{entry_id}/analysis", response_model=EntryAnalysis)
@@ -1130,7 +1154,7 @@ def get_entry_analysis(entry_id: int):
         summary=row["summary"],
         tags=tags_from_json(row["tags_json"]),
         sentiment=row["sentiment"],
-        updatedAt=row["updatedAt"],
+        updatedAt=row_get(row, "updatedAt"),
     )
 
 
@@ -1170,8 +1194,8 @@ def assign_entry_to_cat(entry_id: int, cat_id: int):
     return Entry(
         id=updated["id"],
         text=updated["text"],
-        createdAt=updated["createdAt"],
-        isFavorite=bool(updated["isFavorite"]),
+        createdAt=row_get(updated, "createdAt"),
+        isFavorite=bool(row_get(updated, "isFavorite")),
         nickname=updated["nickname"],
         location=updated["location"],
         cat_id=updated["cat_id"],
@@ -1222,7 +1246,7 @@ def analyze_and_store(entry_id: int):
             summary=existing["summary"],
             tags=tags_from_json(existing["tags_json"]),
             sentiment=existing["sentiment"],
-            updatedAt=existing["updatedAt"],
+            updatedAt=row_get(existing, "updatedAt"),
         )
 
     # 3) Compute fresh analysis (baseline "AI")
