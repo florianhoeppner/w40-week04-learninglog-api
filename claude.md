@@ -259,6 +259,64 @@ def validate_production_settings(self) -> Self:
 
 **Takeaway**: Use validation to prevent common production misconfigurations. Fail fast at startup rather than discovering issues later.
 
+### 7. PostgreSQL Column Name Casing (Critical!)
+**Problem**: After deploying with all fixes (psycopg2, get_cursor(), etc.), still getting `KeyError: 'createdAt'` in production.
+
+**Root Cause**: PostgreSQL **lowercases unquoted column names** in table definitions. When creating tables with:
+```sql
+CREATE TABLE cats (
+    id SERIAL PRIMARY KEY,
+    name TEXT,
+    createdAt TEXT  -- Stored as "createdat" in PostgreSQL!
+)
+```
+
+PostgreSQL converts `createdAt` → `createdat` because it's not quoted. But the code tries to access `r["createdAt"]`, causing a KeyError.
+
+**Why It Was Hard to Debug**:
+- ✅ SQLite preserves case (works locally)
+- ✅ `get_cursor()` returns correct dict cursor
+- ✅ Fresh code deployment confirmed
+- ❌ But column keys were lowercase: `r["createdat"]` not `r["createdAt"]`
+
+**Solution**: Created `row_get()` helper function that tries both casings:
+```python
+def row_get(row, key: str):
+    """
+    Get value from row dict, trying both original case and lowercase.
+    PostgreSQL lowercases unquoted column names, SQLite preserves them.
+    """
+    try:
+        return row[key]
+    except KeyError:
+        return row[key.lower()]
+```
+
+Then updated all column accesses:
+```python
+# Before:
+return Cat(id=r["id"], name=r["name"], createdAt=r["createdAt"])
+
+# After:
+return Cat(
+    id=row_get(r, "id"),
+    name=row_get(r, "name"),
+    createdAt=row_get(r, "createdAt")
+)
+```
+
+**Alternative Solution** (Better for new projects):
+Use quoted identifiers in CREATE TABLE statements:
+```sql
+CREATE TABLE cats (
+    id SERIAL PRIMARY KEY,
+    name TEXT,
+    "createdAt" TEXT  -- Quotes preserve case!
+)
+```
+
+**Takeaway**: PostgreSQL and SQLite handle column name casing differently. Always quote column names with mixed case, OR use a helper function to handle both casings. This is one of the most subtle PostgreSQL migration gotchas!
+
 ## Troubleshooting
 
 ### Tests Failing with "JWT_SECRET must be changed in production!"
@@ -312,6 +370,54 @@ importlib.reload(main)
 3. Ensure PostgreSQL plugin is connected
 4. Check `railway.json` healthcheck path matches actual endpoint
 
+### PostgreSQL: KeyError on Column Names (Even After All Fixes)
+**Cause**: PostgreSQL lowercases unquoted column names, but code expects camelCase
+
+**Symptoms**:
+- `KeyError: 'createdAt'` or `KeyError: 'isFavorite'` in production
+- Works fine locally with SQLite
+- `get_cursor()` is being used correctly
+- Fresh deployment confirmed
+
+**Fix**:
+1. **Quick fix**: Use `row_get()` helper function (see Lesson #7)
+2. **Proper fix**: Rebuild tables with quoted identifiers:
+   ```sql
+   CREATE TABLE cats (
+       id SERIAL PRIMARY KEY,
+       name TEXT,
+       "createdAt" TEXT  -- Quotes preserve case
+   )
+   ```
+
+**Verification**:
+```sql
+-- Check actual column names in PostgreSQL:
+SELECT column_name FROM information_schema.columns
+WHERE table_name = 'cats';
+```
+
+If you see `createdat` instead of `createdAt`, that's the issue!
+
+### Railway Deployment: Persistent Docker Cache
+**Cause**: Railway's Docker registry cache persists across service deletions
+
+**Symptoms**:
+- Build logs show everything as `cached`
+- Deleting and recreating service doesn't help
+- Fresh commits don't trigger fresh builds
+
+**Fix**: Add aggressive cache buster to Dockerfile BEFORE COPY commands:
+```dockerfile
+# Force cache invalidation
+RUN echo "Build timestamp: $(date +%Y-%m-%d-%H:%M:%S)" > /tmp/cachebust.txt
+
+# Then copy files
+COPY . /app
+```
+
+Change the timestamp on every deployment to force Docker to invalidate cache.
+
 ## Migration Checklist (SQLite → PostgreSQL)
 
 When migrating to PostgreSQL or adding PostgreSQL support:
@@ -320,16 +426,21 @@ When migrating to PostgreSQL or adding PostgreSQL support:
 - [ ] Add `database_url` field to config with PostgreSQL connection string support
 - [ ] Implement `is_postgres` property in config to detect database type
 - [ ] Create `get_conn()` function to return appropriate connection type
+- [ ] Create `get_cursor()` function to return `RealDictCursor` for PostgreSQL
+- [ ] **CRITICAL**: Create `row_get()` helper to handle PostgreSQL's lowercase column names
 - [ ] Create `execute_query()` helper to auto-convert placeholders (`?` → `%s`)
 - [ ] Update all SQL queries to use `execute_query()` helper
 - [ ] Change `INTEGER PRIMARY KEY AUTOINCREMENT` to use conditional `SERIAL PRIMARY KEY`
 - [ ] Update INSERT queries to use `RETURNING id` for PostgreSQL
+- [ ] **Either** quote all camelCase column names in CREATE TABLE OR use `row_get()` helper
+- [ ] Update all row accesses to use `row_get(row, "columnName")` instead of `row["columnName"]`
 - [ ] Order table creation to respect foreign key dependencies
 - [ ] Test locally with SQLite (ensure backward compatibility)
 - [ ] Test with PostgreSQL (local instance or Railway)
 - [ ] Update all tests to pass with both database types
 - [ ] Set production environment variables (`DATABASE_URL`, `JWT_SECRET`, `DEBUG=False`)
 - [ ] Deploy and monitor health checks
+- [ ] Verify column name casing works correctly in production
 
 ## Project Milestones
 
