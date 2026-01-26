@@ -15,6 +15,8 @@ import {
   type MatchCandidate,
 } from "./api/endpoints";
 import { useMutation } from "./hooks/useMutation";
+import { ImageUpload } from "./components/ImageUpload";
+import { createEntryWithImage } from "./api/upload";
 
 /**
  * CatAtlas - Production Ready
@@ -48,6 +50,7 @@ export default function App() {
   const [location, setLocation] = useState("");
   const [photoUrl, setPhotoUrl] = useState("");
   const [notes, setNotes] = useState("");
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
 
   // ----------------------------
   // Derived state: what entries to show
@@ -178,14 +181,37 @@ export default function App() {
     const text = notes.trim();
     if (!text) return;
 
-    const payload: EntryCreatePayload = {
-      text,
-      nickname: nickname.trim() ? nickname.trim() : null,
-      location: location.trim() ? location.trim() : null,
-      photo_url: photoUrl.trim() ? photoUrl.trim() : null,
-    };
+    setError(null);
 
-    await createEntryMutation.mutateAsync(payload);
+    // If there's an image file, use the multipart endpoint
+    if (photoFile) {
+      try {
+        const created = await createEntryWithImage(
+          text,
+          nickname.trim() || null,
+          location.trim() || null,
+          photoFile
+        );
+        setEntries((prev) => [created, ...prev]);
+        // Reset form
+        setNickname("");
+        setLocation("");
+        setNotes("");
+        setPhotoUrl("");
+        setPhotoFile(null);
+      } catch (e: any) {
+        setError(e.getUserMessage?.() || "Failed to create sighting");
+      }
+    } else {
+      // Use existing JSON endpoint for entries without image upload
+      const payload: EntryCreatePayload = {
+        text,
+        nickname: nickname.trim() || null,
+        location: location.trim() || null,
+        photo_url: photoUrl.trim() || null,
+      };
+      await createEntryMutation.mutateAsync(payload);
+    }
   }
 
   async function toggleFavorite(entryId: number) {
@@ -325,14 +351,10 @@ export default function App() {
           }}
         />
 
-        <label style={{ display: "block", fontWeight: 600, marginTop: 12 }}>
-        Photo URL (optional)
-        </label>
-        <input
-          value={photoUrl}
-          onChange={(e) => setPhotoUrl(e.target.value)}
-          placeholder="https://... (later: real upload)"
-          style={{ width: "100%", padding: 8, boxSizing: "border-box", marginTop: 6 }}
+        <ImageUpload
+          value={photoFile}
+          onChange={setPhotoFile}
+          disabled={createEntryMutation.loading}
         />
 
         <label style={{ display: "block", fontWeight: 600, marginTop: 12 }}>
@@ -363,6 +385,7 @@ export default function App() {
               setLocation("");
               setPhotoUrl("");
               setNotes("");
+              setPhotoFile(null);
             }}
           >
             Clear

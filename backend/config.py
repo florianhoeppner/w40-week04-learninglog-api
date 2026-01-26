@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     # Feature Flags
     enable_registration: bool = True
 
+    # Image Upload (Bunny.net)
+    bunny_storage_zone: Optional[str] = None  # e.g., "catatlas"
+    bunny_api_key: Optional[str] = None  # Storage API key
+    bunny_storage_region: str = "de"  # Default: Germany (de, ny, la, sg, syd)
+    bunny_cdn_hostname: Optional[str] = None  # e.g., "catatlas.b-cdn.net"
+    max_upload_size_mb: int = 10  # Maximum file size in MB
+    allowed_image_types: str = "image/jpeg,image/png,image/webp,image/gif"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=False,
@@ -56,6 +64,30 @@ class Settings(BaseSettings):
     def is_postgres(self) -> bool:
         """Check if using PostgreSQL (vs SQLite)."""
         return self.database_url is not None and self.database_url.startswith("postgres")
+
+    @property
+    def allowed_image_types_list(self) -> List[str]:
+        """Parse allowed image types as a list."""
+        return [t.strip() for t in self.allowed_image_types.split(",") if t.strip()]
+
+    @property
+    def max_upload_size_bytes(self) -> int:
+        """Convert max upload size to bytes."""
+        return self.max_upload_size_mb * 1024 * 1024
+
+    @property
+    def bunny_storage_url(self) -> Optional[str]:
+        """Generate Bunny.net storage API URL."""
+        if not self.bunny_storage_zone:
+            return None
+        return f"https://{self.bunny_storage_region}.storage.bunnycdn.com/{self.bunny_storage_zone}"
+
+    @property
+    def bunny_cdn_url(self) -> Optional[str]:
+        """Generate Bunny.net CDN URL for serving images."""
+        if not self.bunny_cdn_hostname:
+            return None
+        return f"https://{self.bunny_cdn_hostname}"
 
     def validate_production_settings(self):
         """Validate critical production settings.
