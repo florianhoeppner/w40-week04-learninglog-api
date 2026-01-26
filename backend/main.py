@@ -1,6 +1,6 @@
 """
 main.py — CatAtlas / Learning Log backend (FastAPI + PostgreSQL/SQLite)
-Version: 1.0.1 (2026-01-25 - PostgreSQL cursor fix)
+Version: 1.0.2 (2026-01-26 - Bunny.net default region fix)
 
 This file includes:
 - SQLite persistence for sightings (entries)
@@ -79,7 +79,9 @@ async def startup_event():
     # Check Bunny.net configuration
     try:
         validate_bunny_config()
-        print(f"☁️  Bunny.net: configured ({settings.bunny_storage_region} region)")
+        region_info = settings.bunny_storage_region if settings.bunny_storage_region else "default (Falkenstein)"
+        print(f"☁️  Bunny.net: configured ({region_info} region)")
+        print(f"    Storage endpoint: {settings.bunny_storage_url}")
     except RuntimeError:
         print(f"⚠️  Bunny.net: not configured (image uploads disabled)")
 
