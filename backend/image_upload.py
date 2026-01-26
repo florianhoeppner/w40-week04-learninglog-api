@@ -7,16 +7,109 @@ Bunny.net provides EU-based storage with built-in CDN and image optimization.
 - Cost: ~€0.30/month for 10GB + 20GB bandwidth
 
 API Documentation: https://docs.bunny.net/reference/storage-api
+
+Resiliency Patterns:
+- Retry logic with exponential backoff (3 attempts)
+- Circuit breaker to prevent cascading failures
+- Timeout handling (30s for uploads)
+- Graceful degradation (allows entries without images)
 """
 
 from typing import Optional, Tuple
 import requests
 import uuid
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from fastapi import HTTPException, UploadFile
 from PIL import Image
 import io
 from config import settings
+
+
+# Circuit Breaker State
+class CircuitBreaker:
+    """
+    Circuit breaker pattern to prevent cascading failures.
+
+    States:
+    - CLOSED: Normal operation, requests pass through
+    - OPEN: Too many failures, reject requests immediately
+    - HALF_OPEN: Testing if service recovered
+    """
+
+    def __init__(self, failure_threshold: int = 5, timeout: int = 60):
+        self.failure_threshold = failure_threshold
+        self.timeout = timeout  # seconds until retry
+        self.failures = 0
+        self.last_failure_time: Optional[datetime] = None
+        self.state = "CLOSED"
+
+    def call_failed(self):
+        """Record a failure."""
+        self.failures += 1
+        self.last_failure_time = datetime.utcnow()
+        if self.failures >= self.failure_threshold:
+            self.state = "OPEN"
+            print(f"⚠️  Circuit breaker OPEN after {self.failures} failures")
+
+    def call_succeeded(self):
+        """Record a success."""
+        self.failures = 0
+        self.state = "CLOSED"
+
+    def can_attempt(self) -> bool:
+        """Check if we should attempt the call."""
+        if self.state == "CLOSED":
+            return True
+
+        if self.state == "OPEN":
+            # Check if timeout elapsed
+            if self.last_failure_time:
+                elapsed = (datetime.utcnow() - self.last_failure_time).total_seconds()
+                if elapsed >= self.timeout:
+                    self.state = "HALF_OPEN"
+                    print("🔄 Circuit breaker HALF_OPEN, testing recovery...")
+                    return True
+            return False
+
+        # HALF_OPEN: allow one test request
+        return True
+
+
+# Global circuit breaker for Bunny.net API
+bunny_circuit_breaker = CircuitBreaker(failure_threshold=5, timeout=60)
+
+
+def retry_with_backoff(max_attempts: int = 3, base_delay: float = 1.0):
+    """
+    Decorator for retry logic with exponential backoff.
+
+    Args:
+        max_attempts: Maximum number of retry attempts
+        base_delay: Initial delay in seconds (doubles each retry)
+    """
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except (requests.exceptions.ConnectionError,
+                        requests.exceptions.Timeout) as e:
+                    last_exception = e
+                    if attempt < max_attempts - 1:
+                        delay = base_delay * (2 ** attempt)  # Exponential backoff
+                        print(f"🔄 Retry attempt {attempt + 1}/{max_attempts} after {delay}s...")
+                        time.sleep(delay)
+                    else:
+                        # Last attempt failed
+                        raise
+                except Exception as e:
+                    # Don't retry on non-transient errors
+                    raise
+            raise last_exception
+        return wrapper
+    return decorator
 
 
 def validate_bunny_config():
@@ -148,7 +241,14 @@ async def upload_to_bunny(file: UploadFile, folder: str = "sightings") -> str:
     filename = f"{timestamp}_{unique_id}.{ext}"
     storage_path = f"{folder}/{filename}"
 
-    # Upload to Bunny.net Storage
+    # Check circuit breaker
+    if not bunny_circuit_breaker.can_attempt():
+        raise HTTPException(
+            status_code=503,
+            detail="Image upload service temporarily unavailable. Please try again later."
+        )
+
+    # Upload to Bunny.net Storage with retry logic
     storage_url = f"{settings.bunny_storage_url}/{storage_path}"
 
     headers = {
@@ -156,7 +256,8 @@ async def upload_to_bunny(file: UploadFile, folder: str = "sightings") -> str:
         "Content-Type": "application/octet-stream",
     }
 
-    try:
+    @retry_with_backoff(max_attempts=3, base_delay=1.0)
+    def upload_with_retry():
         response = requests.put(
             storage_url,
             data=file_content,
@@ -165,15 +266,26 @@ async def upload_to_bunny(file: UploadFile, folder: str = "sightings") -> str:
         )
 
         if response.status_code not in [200, 201]:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Bunny.net upload failed: {response.status_code} - {response.text}"
-            )
+            error_detail = f"Bunny.net upload failed: {response.status_code}"
+            if response.text:
+                error_detail += f" - {response.text[:200]}"  # Limit error message length
+            raise requests.exceptions.RequestException(error_detail)
+
+        return response
+
+    try:
+        upload_with_retry()
+        bunny_circuit_breaker.call_succeeded()  # Mark success
 
     except requests.exceptions.Timeout:
+        bunny_circuit_breaker.call_failed()
         raise HTTPException(status_code=504, detail="Upload timeout. Please try again.")
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+    except (requests.exceptions.ConnectionError, requests.exceptions.RequestException) as e:
+        bunny_circuit_breaker.call_failed()
+        raise HTTPException(status_code=503, detail=f"Upload failed: {str(e)}")
+    except Exception as e:
+        bunny_circuit_breaker.call_failed()
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
     # Return CDN URL
     cdn_url = f"{settings.bunny_cdn_url}/{storage_path}"
@@ -189,10 +301,17 @@ async def delete_from_bunny(url: str) -> bool:
 
     Returns:
         True if successful, False otherwise
+
+    Note: This function fails gracefully - returns False instead of raising exceptions.
     """
     try:
         # Validate configuration
         validate_bunny_config()
+
+        # Check circuit breaker (but don't fail hard for deletes)
+        if not bunny_circuit_breaker.can_attempt():
+            print("⚠️  Skipping delete due to circuit breaker (will retry later)")
+            return False
 
         # Extract path from CDN URL
         # Example: https://catatlas.b-cdn.net/sightings/file.jpg -> sightings/file.jpg
@@ -210,19 +329,34 @@ async def delete_from_bunny(url: str) -> bool:
             "AccessKey": settings.bunny_api_key,
         }
 
-        response = requests.delete(
-            storage_url,
-            headers=headers,
-            timeout=10
-        )
+        @retry_with_backoff(max_attempts=2, base_delay=0.5)
+        def delete_with_retry():
+            response = requests.delete(
+                storage_url,
+                headers=headers,
+                timeout=10
+            )
 
-        # 200 = deleted, 404 = already gone (both OK)
-        if response.status_code in [200, 404]:
-            return True
+            # 200 = deleted, 404 = already gone (both OK)
+            if response.status_code in [200, 404]:
+                return True
 
-        print(f"Warning: Failed to delete image: {response.status_code} - {response.text}")
-        return False
+            # Other errors
+            if response.status_code >= 500:
+                # Server error - worth retrying
+                raise requests.exceptions.RequestException(
+                    f"Server error: {response.status_code}"
+                )
+
+            # Client error - don't retry
+            return False
+
+        result = delete_with_retry()
+        if result:
+            bunny_circuit_breaker.call_succeeded()
+        return result
 
     except Exception as e:
         print(f"Warning: Failed to delete image: {str(e)}")
+        bunny_circuit_breaker.call_failed()
         return False
