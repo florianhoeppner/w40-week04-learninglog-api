@@ -268,7 +268,9 @@ async def upload_to_bunny(file: UploadFile, folder: str = "sightings") -> str:
         if response.status_code not in [200, 201]:
             error_detail = f"Bunny.net upload failed: {response.status_code}"
             if response.text:
-                error_detail += f" - {response.text[:200]}"  # Limit error message length
+                # Log full error for debugging
+                print(f"❌ Bunny.net API Error: {response.text}")
+                error_detail += f" - {response.text[:500]}"  # Show more details
             raise requests.exceptions.RequestException(error_detail)
 
         return response
