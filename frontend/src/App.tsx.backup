@@ -1,27 +1,90 @@
 import { useEffect, useMemo, useState } from "react";
 import "./App.css";
-import {
-  getEntries,
-  createEntry,
-  toggleEntryFavorite,
-  analyzeEntry,
-  getEntryAnalysis,
-  findMatches,
-  getCatInsights,
-  type Entry,
-  type EntryCreatePayload,
-  type EntryAnalysis,
-  type CatInsightResponse,
-  type MatchCandidate,
-} from "./api/endpoints";
-import { useMutation } from "./hooks/useMutation";
 
 /**
- * CatAtlas - Production Ready
- * - Resilient API client with retry, timeout, and circuit breaker
- * - Comprehensive error handling
- * - Full test coverage
+ * CatAtlas v0
+ * - Sightings stored in backend (SQLite)
+ * - AI enrichment stored/cached in backend (SQLite)
+ * - Frontend calls backend to create sightings and enrich them
  */
+
+/** A single cat sighting coming from the backend */
+type Entry = {
+  id: number;
+  text: string; // notes / description
+  createdAt: string; // ISO string
+  isFavorite: boolean;
+
+  // CatAtlas-specific optional fields
+  nickname?: string | null;
+  location?: string | null;
+    // NEW: optional photo URL for the sighting
+  photo_url?: string | null;
+
+  // NEW (Week 8): optional link to a Cat identity
+  cat_id?: number | null;
+};
+
+/** Payload when creating a new cat sighting */
+type EntryCreatePayload = {
+  text: string;
+  nickname?: string | null;
+  location?: string | null;
+  photo_url?: string | null;
+};
+
+/**
+ * Stored analysis result returned by:
+ * - POST /entries/{id}/analyze
+ * - GET  /entries/{id}/analysis
+ */
+type EntryAnalysis = {
+  entry_id: number;
+  summary: string;
+  tags: string[];
+  sentiment: "positive" | "neutral" | "negative";
+  updatedAt: string;
+};
+
+type CatInsightResponse = {
+  cat_id: number;
+  mode: string;
+  prompt_version: string;
+  confidence: number;
+  headline: string;
+  summary: string;
+  flags: string[];
+  suggested_actions: string[];
+  citations: { entry_id: number; quote: string; location?: string | null; createdAt: string }[];
+  generatedAt: string;
+};
+
+
+
+
+/** A candidate match returned by GET /matches */
+type MatchCandidate = {
+  entry_id: number;
+  candidate_id: number;
+  score: number;
+  reasons: string[];
+  candidate_nickname?: string | null;
+  candidate_location?: string | null;
+  candidate_text: string;
+  candidate_createdAt: string;
+};
+
+
+/**
+ * IMPORTANT:
+ * In Codespaces, your backend is NOT localhost for your browser.
+ * Use VITE_API_BASE in frontend/.env:
+ *   VITE_API_BASE=https://<your>-8000.app.github.dev
+ */
+const API_BASE = import.meta.env.VITE_API_BASE;
+if (!API_BASE) throw new Error("VITE_API_BASE is not set");
+
+
 
 export default function App() {
   // ----------------------------
@@ -38,7 +101,7 @@ export default function App() {
   const [filter, setFilter] = useState<"all" | "favorites">("all");
   const [error, setError] = useState<string | null>(null);
 
-  // "Loading" state for enrichment button
+  // "Loading" state for enrichment button: we track which entry is currently being enriched
   const [loadingEnrichId, setLoadingEnrichId] = useState<number | null>(null);
 
   // ----------------------------
@@ -56,6 +119,7 @@ export default function App() {
     return entries.filter((e) => (filter === "favorites" ? e.isFavorite : true));
   }, [entries, filter]);
 
+
   // ----------------------------
   // Week 9: Cat Insights state
   // ----------------------------
@@ -63,14 +127,18 @@ export default function App() {
   const [loadingInsightCatId, setLoadingInsightCatId] = useState<number | null>(null);
 
   // ----------------------------
-  // Community stats
+  // Community stats (Step 5)
   // ----------------------------
+
+  // Total number of sightings contributed
   const totalSightings = entries.length;
 
+  // How many sightings already have enrichment stored/loaded
   const enrichedCount = useMemo(() => {
     return Object.keys(analysisById).length;
   }, [analysisById]);
 
+  // Compute top tags across all analyses we currently have in memory
   const topTags = useMemo(() => {
     const counts = new Map<string, number>();
 
@@ -82,10 +150,14 @@ export default function App() {
       });
     });
 
+    // Convert map -> array -> sort by frequency desc
     const sorted = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+
+    // Take top 8 tags (small + readable)
     return sorted.slice(0, 8);
   }, [analysisById]);
 
+  // Most recent sighting date (optional nice touch)
   const mostRecentSighting = useMemo(() => {
     if (entries.length === 0) return null;
     const dates = entries
@@ -96,83 +168,81 @@ export default function App() {
   }, [entries]);
 
   // ----------------------------
-  // API Mutations using new hooks
-  // ----------------------------
-
-  const createEntryMutation = useMutation(createEntry, {
-    onSuccess: (created) => {
-      setEntries((prev) => [created, ...prev]);
-      // Reset form
-      setNickname("");
-      setLocation("");
-      setNotes("");
-      setPhotoUrl("");
-      setError(null);
-    },
-    onError: (err) => {
-      setError(err.getUserMessage());
-    },
-  });
-
-  const toggleFavoriteMutation = useMutation(toggleEntryFavorite, {
-    onSuccess: (updated) => {
-      setEntries((prev) => prev.map((e) => (e.id === updated.id ? updated : e)));
-      setError(null);
-    },
-    onError: (err) => {
-      setError(err.getUserMessage());
-    },
-  });
-
-  // ----------------------------
   // Backend calls
   // ----------------------------
 
   async function loadEntries() {
     setError(null);
     try {
-      const data = await getEntries();
+      const res = await fetch(`${API_BASE}/entries`);
+      if (!res.ok) throw new Error(`GET /entries failed: ${res.status}`);
+      const data = (await res.json()) as Entry[];
       setEntries(data);
 
-      // Load enrichment for each sighting
+      // Step 4/5: After loading sightings, try to load enrichment for each sighting.
+      // If the backend returns 404 (no analysis yet), we just ignore it.
       data.forEach((e) => {
         loadAnalysisIfExists(e.id);
       });
-    } catch (e: any) {
+    } catch (e) {
       console.error(e);
-      setError(e.getUserMessage?.() || "Could not load sightings.");
+      setError("Could not load sightings. Is the backend running?");
     }
   }
+
 
   async function fetchCatInsights(catId: number, mode: "profile" | "care" | "update" | "risk") {
-    setLoadingInsightCatId(catId);
-    setError(null);
+  setLoadingInsightCatId(catId);
+  setError(null);
 
-    try {
-      const data = await getCatInsights(catId, mode);
-      setInsightByCatId((prev) => ({ ...prev, [catId]: data }));
-    } catch (e: any) {
-      console.error(e);
-      setError(e.getUserMessage?.() || "Could not load cat insights.");
-    } finally {
-      setLoadingInsightCatId(null);
-    }
+  try {
+    const res = await fetch(`${API_BASE}/cats/${catId}/insights`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+
+    if (!res.ok) throw new Error(`Insights failed: ${res.status}`);
+
+    const data = (await res.json()) as CatInsightResponse;
+
+    setInsightByCatId((prev) => ({
+      ...prev,
+      [catId]: data,
+    }));
+  } catch (e) {
+    console.error(e);
+    setError("Could not load cat insights. Is the backend running?");
+  } finally {
+    setLoadingInsightCatId(null);
   }
+}
 
-  async function findMatchesForEntry(entryId: number) {
-    setLoadingMatchId(entryId);
-    setError(null);
 
-    try {
-      const data = await findMatches(entryId, 5, 0.15);
-      setMatchesById((prev) => ({ ...prev, [entryId]: data }));
-    } catch (e: any) {
-      console.error(e);
-      setError(e.getUserMessage?.() || "Could not load matches.");
-    } finally {
-      setLoadingMatchId(null);
+  async function findMatches(entryId: number) {
+  setLoadingMatchId(entryId);
+  setError(null);
+
+  try {
+    const res = await fetch(`${API_BASE}/entries/${entryId}/matches?top_k=5&min_score=0.15`);
+    if (!res.ok) {
+      throw new Error(`Matches failed: ${res.status}`);
     }
+
+    const data = (await res.json()) as MatchCandidate[];
+
+    setMatchesById((prev) => ({
+      ...prev,
+      [entryId]: data,
+    }));
+  } catch (e) {
+    console.error(e);
+    setError("Could not load matches. Is the backend running?");
+  } finally {
+    setLoadingMatchId(null);
   }
+}
+
 
   async function addSighting() {
     const text = notes.trim();
@@ -185,36 +255,99 @@ export default function App() {
       photo_url: photoUrl.trim() ? photoUrl.trim() : null,
     };
 
-    await createEntryMutation.mutateAsync(payload);
+    setError(null);
+
+    try {
+      const res = await fetch(`${API_BASE}/entries`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) throw new Error(`POST /entries failed: ${res.status}`);
+
+      const created = (await res.json()) as Entry;
+      setEntries((prev) => [created, ...prev]);
+
+      // Reset form for fast, repeated sightings
+      setNickname("");
+      setLocation("");
+      setNotes("");
+      setPhotoUrl("");
+    } catch (e) {
+      console.error(e);
+      setError("Could not create sighting. Is the backend running?");
+    }
   }
 
   async function toggleFavorite(entryId: number) {
-    await toggleFavoriteMutation.mutateAsync(entryId);
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE}/entries/${entryId}/favorite`, {
+        method: "POST",
+      });
+
+      if (!res.ok) throw new Error(`POST /favorite failed: ${res.status}`);
+
+      const updated = (await res.json()) as Entry;
+      setEntries((prev) => prev.map((e) => (e.id === entryId ? updated : e)));
+    } catch (e) {
+      console.error(e);
+      setError("Could not toggle favorite. Is the backend running?");
+    }
   }
 
+  /**
+   * Step 4: Reframed AI analysis:
+   * - In CatAtlas we call this "Enrich with AI" (same behavior as analyze)
+   * - We store results in SQLite on the backend (Week 6 pattern)
+   */
   async function enrichWithAI(entryId: number) {
     setLoadingEnrichId(entryId);
     setError(null);
 
     try {
-      const data = await analyzeEntry(entryId);
-      setAnalysisById((prev) => ({ ...prev, [entryId]: data }));
-    } catch (e: any) {
+      // This endpoint computes analysis IF needed and persists it in SQLite.
+      // If cached and up-to-date, it returns the cached result quickly.
+      const res = await fetch(`${API_BASE}/entries/${entryId}/analyze`, {
+        method: "POST",
+      });
+
+      if (!res.ok) throw new Error(`POST /entries/${entryId}/analyze failed`);
+
+      const data = (await res.json()) as EntryAnalysis;
+
+      setAnalysisById((prev) => ({
+        ...prev,
+        [entryId]: data,
+      }));
+    } catch (e) {
       console.error(e);
-      setError(e.getUserMessage?.() || "Enrichment failed.");
+      setError("Enrichment failed. Is the backend running?");
     } finally {
       setLoadingEnrichId(null);
     }
   }
 
+  /**
+   * Load analysis from backend if it already exists.
+   * - 200 => store it
+   * - 404 => not enriched yet (normal)
+   */
   async function loadAnalysisIfExists(entryId: number) {
     try {
-      const data = await getEntryAnalysis(entryId);
-      setAnalysisById((prev) => ({ ...prev, [entryId]: data }));
-    } catch (e: any) {
-      // 404 is expected when no analysis exists
-      if (e.details?.statusCode === 404) return;
-      // Silently ignore other errors for now
+      const res = await fetch(`${API_BASE}/entries/${entryId}/analysis`);
+      if (res.status === 404) return; // no analysis yet is fine
+      if (!res.ok) return;
+
+      const data = (await res.json()) as EntryAnalysis;
+
+      setAnalysisById((prev) => ({
+        ...prev,
+        [entryId]: data,
+      }));
+    } catch {
+      // Ignore for now (this is an optional enhancement)
     }
   }
 
@@ -238,10 +371,13 @@ export default function App() {
 
       {error && <p style={{ color: "crimson" }}>{error}</p>}
 
-      {/* Community snapshot */}
+      {/* ------------------------------------------------------------
+          Step 5 — "Community feeling" dashboard
+          ------------------------------------------------------------ */}
       <section style={{ marginTop: 16 }}>
         <h2>Community snapshot</h2>
 
+        {/* Simple numbers create an immediate sense of progress/community */}
         <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
           <div style={{ padding: 10, border: "1px solid #eee", borderRadius: 8 }}>
             <div style={{ fontSize: 12, color: "#666" }}>Total sightings</div>
@@ -261,6 +397,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Show most common tags across enriched sightings */}
         <div style={{ marginTop: 12 }}>
           <div style={{ fontSize: 12, color: "#666", marginBottom: 6 }}>
             Top tags (from AI enrichment)
@@ -268,7 +405,7 @@ export default function App() {
 
           {topTags.length === 0 ? (
             <div style={{ color: "#666" }}>
-              No enrichment yet. Click "Enrich with AI" on a sighting to start building shared knowledge.
+              No enrichment yet. Click “Enrich with AI” on a sighting to start building shared knowledge.
             </div>
           ) : (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -291,7 +428,9 @@ export default function App() {
         </div>
       </section>
 
-      {/* Add cat sighting form */}
+      {/* ------------------------------------------------------------
+          Add cat sighting form (you already built this in Step 3)
+          ------------------------------------------------------------ */}
       <section style={{ marginTop: 24 }}>
         <h2>Add cat sighting</h2>
 
@@ -352,8 +491,8 @@ export default function App() {
         />
 
         <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button type="button" onClick={addSighting} disabled={!notes.trim() || createEntryMutation.loading}>
-            {createEntryMutation.loading ? "Adding..." : "Add sighting"}
+          <button type="button" onClick={addSighting} disabled={!notes.trim()}>
+            Add sighting
           </button>
 
           <button
@@ -378,7 +517,9 @@ export default function App() {
         </p>
       </section>
 
-      {/* Filters */}
+      {/* ------------------------------------------------------------
+          Filters (same as Week 4)
+          ------------------------------------------------------------ */}
       <section className="filters" style={{ marginTop: 16 }}>
         <button
           className={filter === "all" ? "active" : ""}
@@ -397,7 +538,9 @@ export default function App() {
         </button>
       </section>
 
-      {/* Sightings list */}
+      {/* ------------------------------------------------------------
+          Sightings list + Step 4: "Enrich with AI" button + output
+          ------------------------------------------------------------ */}
       <section style={{ marginTop: 16 }}>
         <h2>Sightings</h2>
 
@@ -411,10 +554,12 @@ export default function App() {
 
               return (
                 <li key={e.id} className="entry-item">
+                  {/* Title line: nickname if available */}
                   <div style={{ fontWeight: 800 }}>
                     {e.nickname ? e.nickname : `Cat #${e.id}`}
                   </div>
 
+                  {/* Optional location */}
                   {e.location && (
                     <div style={{ color: "#555", marginTop: 4 }}>
                       📍 {e.location}
@@ -428,17 +573,21 @@ export default function App() {
                   />
                   )}
 
+                  {/* Notes/description */}
                   <div style={{ marginTop: 8 }}>{e.text}</div>
 
+                  {/* Timestamp */}
                   <div className="entry-meta" style={{ marginTop: 8 }}>
                     {new Date(e.createdAt).toLocaleString()}
                   </div>
 
+                  {/* Action buttons */}
                   <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <button type="button" onClick={() => toggleFavorite(e.id)} disabled={toggleFavoriteMutation.loading}>
+                    <button type="button" onClick={() => toggleFavorite(e.id)}>
                       {e.isFavorite ? "Unfavorite" : "Favorite"}
                     </button>
 
+                    {/* Step 4: reframe "Analyze" => "Enrich with AI" */}
                     <button
                       type="button"
                       onClick={() => enrichWithAI(e.id)}
@@ -450,12 +599,13 @@ export default function App() {
 
                     <button
                       type="button"
-                      onClick={() => findMatchesForEntry(e.id)}
+                      onClick={() => findMatches(e.id)}
                       disabled={loadingMatchId === e.id}
                       title="Suggest similar cats based on notes + location (text-only)"
                     >
                       {loadingMatchId === e.id ? "Matching…" : "Find matches"}
                     </button>
+
 
                     {catId != null && (
                       <button
@@ -465,9 +615,13 @@ export default function App() {
                       >
                         Get cat profile (AI)
                       </button>
+
                     )}
+
+
                   </div>
 
+                  {/* Step 4: show the enriched result under the sighting */}
                   {analysis && (
                     <div
                       style={{
@@ -486,6 +640,7 @@ export default function App() {
                         <strong>Summary:</strong> {analysis.summary}
                       </div>
 
+                      {/* We intentionally label sentiment as temperament to fit CatAtlas domain */}
                       <div style={{ marginTop: 6 }}>
                         <strong>Temperament:</strong>{" "}
                         {analysis.sentiment === "positive"
@@ -507,6 +662,10 @@ export default function App() {
                       </div>
                     </div>
                   )}
+
+
+
+
 
                   {matchesById[e.id] && (
                     <div style={{ marginTop: 12, padding: 12, border: "1px solid #eee", borderRadius: 8 }}>
@@ -543,7 +702,10 @@ export default function App() {
                     </div>
                   )}
 
+
                  {catId != null && loadingInsightCatId === catId && <div>Generating insights…</div>}
+
+
 
                   {catId != null && insightByCatId[catId] && (
                     <div style={{ marginTop: 12, padding: 12, border: "1px solid var(--border)", borderRadius: 8 }}>
@@ -580,6 +742,7 @@ export default function App() {
                       </div>
                     </div>
                   )}
+
                 </li>
               );
             })
