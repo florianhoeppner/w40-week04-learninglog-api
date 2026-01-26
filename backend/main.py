@@ -28,10 +28,11 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Literal, Union
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from config import settings
+from image_upload import upload_to_bunny, delete_from_bunny, validate_bunny_config
 
 # PostgreSQL support
 try:
@@ -74,6 +75,13 @@ async def startup_event():
         print(f"📡 Sentry monitoring: enabled")
     print(f"🔐 JWT algorithm: {settings.jwt_algorithm}")
     print(f"⏰ Access token expiry: {settings.access_token_expire_minutes} minutes")
+
+    # Check Bunny.net configuration
+    try:
+        validate_bunny_config()
+        print(f"☁️  Bunny.net: configured ({settings.bunny_storage_region} region)")
+    except RuntimeError:
+        print(f"⚠️  Bunny.net: not configured (image uploads disabled)")
 
 
 @app.get("/health")
@@ -1048,6 +1056,141 @@ def create_entry(payload: EntryCreate):
         location=location,
         cat_id=None,
         photo_url=photo_url,
+    )
+
+
+# -----------------------------------------------------------------------------
+# Image Upload Endpoints (Bunny.net CDN Storage)
+# -----------------------------------------------------------------------------
+
+@app.post("/upload/image")
+async def upload_image_endpoint(file: UploadFile = File(...)):
+    """
+    Upload an image and return its CDN URL.
+
+    This is a standalone endpoint that can be called independently
+    or as part of creating/updating a sighting.
+
+    Returns:
+        {"url": "https://catatlas.b-cdn.net/sightings/..."}
+    """
+    url = await upload_to_bunny(file, folder="sightings")
+    return {"url": url}
+
+
+@app.post("/entries/with-image", response_model=Entry)
+async def create_entry_with_image(
+    text: str = Form(...),
+    nickname: Optional[str] = Form(None),
+    location: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None)
+):
+    """
+    Create a new cat sighting with optional image upload.
+
+    This endpoint accepts multipart/form-data instead of JSON.
+    Use this when uploading an image along with the entry data.
+    """
+    # Upload image if provided
+    photo_url = None
+    if image:
+        photo_url = await upload_to_bunny(image, folder="sightings")
+
+    # Validate text
+    text_clean = text.strip()
+    if not text_clean:
+        raise HTTPException(status_code=400, detail="text must not be empty")
+
+    created_at = datetime.utcnow().isoformat() + "Z"
+
+    nickname_clean = nickname.strip() if nickname and nickname.strip() else None
+    location_clean = location.strip() if location and location.strip() else None
+
+    conn = get_conn()
+    cur = get_cursor(conn)
+
+    ph = sql_placeholder()
+    if settings.is_postgres:
+        execute_query(cur,
+            f"""
+            INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+            RETURNING id
+            """,
+            (text_clean, created_at, 0, nickname_clean, location_clean, None, photo_url),
+        )
+        new_id = cur.fetchone()['id']
+    else:
+        execute_query(cur,
+            f"""
+            INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+            """,
+            (text_clean, created_at, 0, nickname_clean, location_clean, None, photo_url),
+        )
+        new_id = cur.lastrowid
+
+    conn.commit()
+    conn.close()
+
+    return Entry(
+        id=new_id,
+        text=text_clean,
+        createdAt=created_at,
+        isFavorite=False,
+        nickname=nickname_clean,
+        location=location_clean,
+        cat_id=None,
+        photo_url=photo_url,
+    )
+
+
+@app.patch("/entries/{entry_id}/image", response_model=Entry)
+async def update_entry_image(entry_id: int, image: UploadFile = File(...)):
+    """
+    Add or replace an image for an existing sighting.
+
+    If the entry already has an image, the old one will be deleted from Bunny.net.
+    """
+    conn = get_conn()
+    cur = get_cursor(conn)
+
+    # Get existing entry
+    ph = sql_placeholder()
+    execute_query(cur,
+        f"SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url FROM entries WHERE id = {ph}",
+        (entry_id,)
+    )
+    row = cur.fetchone()
+    if row is None:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+    # Delete old image if exists
+    old_url = row_get(row, "photo_url")
+    if old_url:
+        await delete_from_bunny(old_url)  # Best effort, don't fail if deletion fails
+
+    # Upload new image
+    new_url = await upload_to_bunny(image, folder="sightings")
+
+    # Update entry
+    execute_query(cur,
+        f"UPDATE entries SET photo_url = {ph} WHERE id = {ph}",
+        (new_url, entry_id)
+    )
+    conn.commit()
+    conn.close()
+
+    return Entry(
+        id=row_get(row, "id"),
+        text=row_get(row, "text"),
+        createdAt=row_get(row, "createdAt"),
+        isFavorite=bool(row_get(row, "isFavorite")),
+        nickname=row_get(row, "nickname"),
+        location=row_get(row, "location"),
+        cat_id=row_get(row, "cat_id"),
+        photo_url=new_url,
     )
 
 
