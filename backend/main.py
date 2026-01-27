@@ -145,16 +145,29 @@ def get_conn() -> Union[sqlite3.Connection, 'psycopg2.extensions.connection']:
         return conn
 
 
-def _try_alter_table(cur, sql: str) -> None:
+def _try_alter_table(conn, cur, sql: str) -> None:
     """
     Attempt ALTER TABLE and ignore errors if column already exists.
     Works for both SQLite and PostgreSQL.
+
+    PostgreSQL requires special handling: when a query fails, the transaction
+    is aborted. We use savepoints to recover from expected failures.
     """
-    try:
-        execute_query(cur, sql)
-    except (sqlite3.OperationalError, Exception):
-        # Column already exists or other error - ignore for idempotency
-        pass
+    if settings.is_postgres:
+        # Use savepoint to allow recovery from expected errors
+        try:
+            cur.execute("SAVEPOINT alter_table_savepoint")
+            execute_query(cur, sql)
+            cur.execute("RELEASE SAVEPOINT alter_table_savepoint")
+        except Exception:
+            # Rollback to savepoint and continue
+            cur.execute("ROLLBACK TO SAVEPOINT alter_table_savepoint")
+    else:
+        # SQLite: simple try/except works fine
+        try:
+            execute_query(cur, sql)
+        except sqlite3.OperationalError:
+            pass
 
 
 def get_cursor(conn):
@@ -279,16 +292,16 @@ def init_db() -> None:
     # For SQLite, add columns if they don't exist (for backward compatibility)
     # PostgreSQL: columns already in CREATE TABLE above
     if not is_postgres:
-        _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN nickname TEXT")
-        _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN location TEXT")
-        _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN cat_id INTEGER")
-        _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN photo_url TEXT")
+        _try_alter_table(conn, cur, "ALTER TABLE entries ADD COLUMN nickname TEXT")
+        _try_alter_table(conn, cur, "ALTER TABLE entries ADD COLUMN location TEXT")
+        _try_alter_table(conn, cur, "ALTER TABLE entries ADD COLUMN cat_id INTEGER")
+        _try_alter_table(conn, cur, "ALTER TABLE entries ADD COLUMN photo_url TEXT")
 
     # Location normalization columns (Phase 1 - OpenStreetMap integration)
-    _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN location_normalized TEXT")
-    _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN location_lat REAL")
-    _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN location_lon REAL")
-    _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN location_osm_id TEXT")
+    _try_alter_table(conn, cur, "ALTER TABLE entries ADD COLUMN location_normalized TEXT")
+    _try_alter_table(conn, cur, "ALTER TABLE entries ADD COLUMN location_lat REAL")
+    _try_alter_table(conn, cur, "ALTER TABLE entries ADD COLUMN location_lon REAL")
+    _try_alter_table(conn, cur, "ALTER TABLE entries ADD COLUMN location_osm_id TEXT")
 
     # --- Analyses table - depends on entries ---
     execute_query(cur,
