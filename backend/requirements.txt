@@ -9,3 +9,6 @@ psycopg2-binary==2.9.9
 # Image upload with Bunny.net
 requests==2.31.0
 pillow>=11.0.0
+
+# Location normalization (OpenStreetMap Nominatim)
+httpx>=0.25.0
