@@ -1,13 +1,33 @@
 # Claude Code Configuration
 
+## Current Version
+
+**Backend**: v1.0.2 - Bunny.net CDN Integration (2026-01-26)
+- ✅ Image upload with Bunny.net CDN storage
+- ✅ Retry logic with exponential backoff (3 attempts)
+- ✅ Circuit breaker pattern for resilience
+- ✅ Fixed default region endpoint configuration
+- ✅ Diagnostic tools and comprehensive troubleshooting guide
+
+**Frontend**: Deployed on Vercel with image upload support
+
+**Recent Changes**:
+- Fixed Bunny.net region endpoint (empty string for default Falkenstein region)
+- Added retry logic and circuit breaker for CDN uploads
+- Implemented multipart/form-data endpoints for image uploads
+- Created diagnostic tool (`debug_bunny.py`) for testing connectivity
+- Expanded CORS configuration for Vercel preview URLs
+- Added comprehensive troubleshooting documentation
+
 ## Project Context
 **CatAtlas** is a full-stack web application for tracking and managing feral/stray cat sightings. It features AI-powered insights, duplicate detection, and community-driven cat profiles. Built as a learning project demonstrating RESTful API design, modern React development, and CI/CD practices.
 
 **Tech Stack:**
 - Backend: FastAPI (Python 3.11+), PostgreSQL (production) / SQLite (local dev), Uvicorn
 - Frontend: React 19, TypeScript, Vite
+- Image Storage: Bunny.net CDN (EU-based, GDPR-compliant)
 - Testing: pytest, FastAPI TestClient
-- Deployment: Railway.app (Docker-based)
+- Deployment: Railway.app (Docker-based), Vercel (frontend)
 - CI/CD: GitHub Actions, Docker
 - Configuration: Pydantic Settings v2, python-dotenv
 
@@ -15,6 +35,8 @@
 ### Backend
 - `backend/main.py` - FastAPI application entry point with database abstraction layer
 - `backend/config.py` - Environment-based configuration using Pydantic Settings v2
+- `backend/image_upload.py` - Bunny.net CDN integration with retry logic and circuit breaker
+- `backend/debug_bunny.py` - Diagnostic tool for testing Bunny.net connectivity
 - `backend/requirements.txt` - Python dependencies (includes psycopg2-binary for PostgreSQL)
 - `backend/Dockerfile` - Docker container configuration
 - `backend/tests/` - Test suite (pytest)
@@ -37,6 +59,10 @@
 ### Deployment
 - `railway.json` - Railway deployment configuration
 - `.env.example` - Environment variables template
+- `BUNNY_NET_SETUP.md` - Guide for setting up Bunny.net CDN storage
+- `BUNNY_NET_TROUBLESHOOTING.md` - Troubleshooting guide for Bunny.net issues
+- `RAILWAY_SETUP.md` - Railway deployment guide
+- `PRODUCTION_DEPLOYMENT_PLAN.md` - Production deployment checklist
 
 ### CI/CD
 - `.github/workflows/python-ci.yml` - Backend testing & linting
@@ -54,6 +80,10 @@ The application uses Pydantic Settings v2 for environment-based configuration (`
 - **`DATABASE_URL`** (str, optional) - PostgreSQL connection string (e.g., `postgresql://user:pass@host:5432/db`)
 - **`CATATLAS_DB_PATH`** (str, default: `"learninglog.db"`) - SQLite database path for local development
 - **`SENTRY_DSN`** (str, optional) - Sentry DSN for error tracking
+- **`BUNNY_STORAGE_ZONE`** (str, optional) - Bunny.net storage zone name (e.g., `catatlas`)
+- **`BUNNY_API_KEY`** (str, optional) - Bunny.net Storage API key (password from FTP & API Access)
+- **`BUNNY_STORAGE_REGION`** (str, default: `""`) - Storage region prefix (empty for default/Falkenstein, or `ny`/`uk`/`la`/`sg`/`syd`)
+- **`BUNNY_CDN_HOSTNAME`** (str, optional) - Bunny.net CDN hostname (e.g., `catatlas.b-cdn.net`)
 
 ### Configuration Modes
 - **Development**: Uses SQLite (`learninglog.db`), `DEBUG=True`, relaxed validation
@@ -96,6 +126,66 @@ The application supports **both SQLite and PostgreSQL** through an abstraction l
 }
 ```
 
+## Image Upload & CDN (Bunny.net)
+
+**Version**: 1.0.2+ includes full image upload support via Bunny.net CDN
+
+### Architecture
+- **Storage**: Bunny.net Edge Storage (EU-based, GDPR-compliant, ~€0.30/month for 10GB + 20GB bandwidth)
+- **CDN**: Bunny.net Pull Zone for global content delivery
+- **Resiliency**: Retry logic with exponential backoff (3 attempts), circuit breaker pattern, 30s timeout
+- **Security**: API key authentication, file type validation, size limits (10MB default)
+
+### Key Components
+- `backend/image_upload.py` - Upload handler with retry logic, circuit breaker, validation
+- `frontend/src/components/ImageUpload.tsx` - React component for file selection and preview
+- `frontend/src/api/upload.ts` - API client for multipart/form-data uploads
+
+### API Endpoints
+- `POST /entries/with-image` - Create entry with image upload (multipart/form-data)
+- `PATCH /entries/{id}/image` - Add or replace entry image
+- `DELETE /entries/{id}/image` - Delete entry image from CDN
+
+### Setup Requirements
+1. **Create Bunny.net Account** at https://bunny.net
+2. **Create Storage Zone** in dashboard (e.g., `catatlas`)
+3. **Create Pull Zone** connected to the storage zone
+4. **Get Storage API Key** from Storage Zone → FTP & API Access → Password (NOT Account API Key)
+5. **Configure Environment Variables** in Railway:
+   ```
+   BUNNY_STORAGE_ZONE=catatlas
+   BUNNY_API_KEY=your-storage-password-here
+   BUNNY_STORAGE_REGION=         # Empty for default (Falkenstein/Germany)
+   BUNNY_CDN_HOSTNAME=catatlas.b-cdn.net
+   ```
+
+### Region Configuration
+**CRITICAL**: The default region (Falkenstein, Germany) uses `storage.bunnycdn.com` without a region prefix:
+- ❌ Wrong: `BUNNY_STORAGE_REGION=de` → `de.storage.bunnycdn.com` (doesn't exist!)
+- ✅ Correct: `BUNNY_STORAGE_REGION=` (empty) → `storage.bunnycdn.com`
+
+Other regions use prefixes:
+- `ny` → `ny.storage.bunnycdn.com` (New York)
+- `uk` → `uk.storage.bunnycdn.com` (London)
+- `la` → `la.storage.bunnycdn.com` (Los Angeles)
+- `sg` → `sg.storage.bunnycdn.com` (Singapore)
+- `syd` → `syd.storage.bunnycdn.com` (Sydney)
+
+### Troubleshooting
+See `BUNNY_NET_TROUBLESHOOTING.md` for detailed debugging guide.
+
+**Common Issues**:
+1. **503 errors / Connection timeout**: Wrong region endpoint (use empty string for default region)
+2. **401 Unauthorized**: Wrong API key or using Account API Key instead of Storage API Key
+3. **403 Forbidden on CDN**: Pull Zone not connected to Storage Zone or hotlink protection enabled
+4. **Images upload but don't display**: Check Pull Zone configuration and CORS settings
+
+**Diagnostic Tool**:
+```bash
+cd backend
+python debug_bunny.py  # Tests connectivity, credentials, and permissions
+```
+
 ## Development Guidelines
 - Use Python 3.11+ for backend development
 - Follow PEP 8 style guidelines (enforced by flake8)
@@ -136,9 +226,11 @@ docker run -p 8000:8000 catatlas-backend
 ## API Reference
 - Docs: `http://localhost:8000/docs` (Swagger UI)
 - Health check: `GET /health`
-- Sightings: `GET/POST /entries`
-- AI analysis: `POST /entries/{id}/analyze`
+- Sightings: `GET/POST /entries`, `POST /entries/with-image`
+- Images: `PATCH /entries/{id}/image`, `DELETE /entries/{id}/image`
+- AI analysis: `GET /entries/{id}/analysis`, `POST /entries/{id}/analyze`
 - Cat profiles: `GET/POST /cats`
+- Cat insights: `POST /cats/{id}/insights`
 
 ## Important Notes
 
@@ -317,6 +409,52 @@ CREATE TABLE cats (
 
 **Takeaway**: PostgreSQL and SQLite handle column name casing differently. Always quote column names with mixed case, OR use a helper function to handle both casings. This is one of the most subtle PostgreSQL migration gotchas!
 
+### 8. Bunny.net Default Region Endpoint (Critical CDN Issue!)
+**Problem**: Image uploads failing with connection timeouts and 503 errors after all retry attempts exhausted.
+
+**Root Cause**: The default Bunny.net region (Falkenstein, Germany) uses `storage.bunnycdn.com` without a region prefix, but we were configuring `BUNNY_STORAGE_REGION=de`, which created an invalid endpoint:
+```
+❌ Wrong: https://de.storage.bunnycdn.com/catatlas (DNS doesn't exist!)
+✅ Correct: https://storage.bunnycdn.com/catatlas
+```
+
+**Why It Was Hard to Debug**:
+- Configuration showed as "configured (de region)" in logs
+- All other settings were correct (API key, storage zone name, CDN hostname)
+- No explicit error from Bunny.net - just connection timeout
+- Retry logic was executing but couldn't connect
+
+**Symptoms**:
+```
+🔄 Retry attempt 1/3 after 1.0s...
+🔄 Retry attempt 2/3 after 2.0s...
+INFO: "POST /entries/with-image HTTP/1.1" 503 Service Unavailable
+```
+
+**Solution**: Changed default `BUNNY_STORAGE_REGION` from `"de"` to `""` (empty string) and updated the URL builder:
+```python
+@property
+def bunny_storage_url(self) -> Optional[str]:
+    if not self.bunny_storage_zone:
+        return None
+
+    # Default region (empty string) uses storage.bunnycdn.com (no prefix)
+    if self.bunny_storage_region:
+        return f"https://{self.bunny_storage_region}.storage.bunnycdn.com/{self.bunny_storage_zone}"
+    else:
+        return f"https://storage.bunnycdn.com/{self.bunny_storage_zone}"
+```
+
+**Region Mapping**:
+- Empty string → `storage.bunnycdn.com` (Falkenstein, Germany - default)
+- `ny` → `ny.storage.bunnycdn.com`
+- `uk` → `uk.storage.bunnycdn.com`
+- `la` → `la.storage.bunnycdn.com`
+- `sg` → `sg.storage.bunnycdn.com`
+- `syd` → `syd.storage.bunnycdn.com`
+
+**Takeaway**: CDN providers may use different endpoint patterns for their default vs regional data centers. Always check the actual API documentation for endpoint formats. The retry logic correctly identified it as a connection issue, not an authentication problem.
+
 ## Troubleshooting
 
 ### Tests Failing with "JWT_SECRET must be changed in production!"
@@ -399,6 +537,71 @@ WHERE table_name = 'cats';
 
 If you see `createdat` instead of `createdAt`, that's the issue!
 
+### Bunny.net: Image Uploads Timeout with 503 Errors
+**Cause**: Wrong storage region endpoint (using `de` for default region)
+
+**Symptoms**:
+- Retry attempts shown in logs: `🔄 Retry attempt 1/3 after 1.0s...`
+- All retries fail with connection timeout
+- Final 503 Service Unavailable response
+- Configuration shows "Bunny.net: configured" on startup
+
+**Fix**:
+1. Set `BUNNY_STORAGE_REGION=` (empty string) in Railway for default region
+2. OR use appropriate region code: `ny`, `uk`, `la`, `sg`, `syd`
+3. Redeploy and verify startup logs show correct endpoint:
+   ```
+   ☁️  Bunny.net: configured (default (Falkenstein) region)
+       Storage endpoint: https://storage.bunnycdn.com/catatlas
+   ```
+
+### Bunny.net: 401 Unauthorized on Upload
+**Cause**: Using Account API Key instead of Storage API Key
+
+**Fix**:
+1. Go to Bunny.net → Storage → Storage Zones → Click your zone
+2. Go to "FTP & API Access" tab
+3. Copy the **Password** field (this is the Storage API Key)
+4. Update `BUNNY_API_KEY` in Railway with this password
+5. Ensure you're using the regular Password, NOT the Read-only Password
+
+### Bunny.net: Images Upload Successfully But Don't Display (403 on CDN)
+**Cause**: Pull Zone not properly configured or connected to Storage Zone
+
+**Symptoms**:
+- Image uploads succeed (no errors in backend)
+- Direct CDN URL returns 403 Forbidden
+- Image tag renders but doesn't load
+
+**Fix**:
+1. Go to Bunny.net → CDN → Pull Zones
+2. Click your pull zone (e.g., `catatlas`)
+3. Go to General → Origin section
+4. Verify "Storage zone" is set to your storage zone name
+5. Click "Save Origin" if needed
+6. Go to Security tab:
+   - Ensure "Block root path access" is OFF
+   - Clear any "Blocked referrers"
+   - Either clear "Allowed referrers" or add your domains
+7. Test by accessing image URL directly in browser
+
+### Bunny.net: Diagnostic Tool
+**Use Case**: Verify Bunny.net configuration and credentials
+
+**Run**:
+```bash
+cd backend
+python debug_bunny.py
+```
+
+**What It Tests**:
+- ✅ Environment variables are set
+- ✅ Can list files in storage zone (tests API key validity)
+- ✅ Can upload test file (tests write permissions)
+- ✅ Can delete test file (tests cleanup)
+
+**Output**: Detailed diagnostics with specific error messages and next steps
+
 ### Railway Deployment: Persistent Docker Cache
 **Cause**: Railway's Docker registry cache persists across service deletions
 
@@ -457,12 +660,17 @@ When migrating to PostgreSQL or adding PostgreSQL support:
 - [x] Environment-based validation
 - [x] PostgreSQL migration with database abstraction
 - [x] Railway.app production deployment
+- [x] Vercel frontend deployment
 - [x] Health check monitoring
+- [x] Image upload and storage (Bunny.net CDN)
+- [x] Retry logic with exponential backoff
+- [x] Circuit breaker pattern for CDN resilience
+- [x] Multipart form-data handling
+- [x] Image validation (type, size limits)
+- [x] CDN integration with Pull Zone
 
 ### 🚧 Potential Future Enhancements
-- [ ] Frontend deployment to Railway or Vercel
 - [ ] User authentication and authorization
-- [ ] Image upload and storage (S3/Cloudinary)
 - [ ] Real-time updates with WebSockets
 - [ ] Advanced search and filtering
 - [ ] Map view of cat sightings
@@ -472,3 +680,5 @@ When migrating to PostgreSQL or adding PostgreSQL support:
 - [ ] Performance monitoring (New Relic/DataDog)
 - [ ] Rate limiting middleware
 - [ ] API versioning
+- [ ] Image optimization and thumbnails
+- [ ] Batch image upload
