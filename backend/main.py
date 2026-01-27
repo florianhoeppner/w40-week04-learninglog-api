@@ -484,6 +484,78 @@ class GeocodingHealthResponse(BaseModel):
 
 
 # -----------------------------------------------------------------------------
+# Phase 3: Validation Workflow Models
+# -----------------------------------------------------------------------------
+
+class LinkSightingsRequest(BaseModel):
+    """Request to bulk link sightings to an existing cat."""
+    entry_ids: List[int] = Field(..., min_length=1, description="List of entry IDs to link")
+
+
+class LinkSightingsResponse(BaseModel):
+    """Response from bulk linking sightings to a cat."""
+    cat_id: int
+    linked_count: int
+    already_linked: List[int]
+    newly_linked: List[int]
+    failed: List[int]
+
+
+class CreateCatFromSightingsRequest(BaseModel):
+    """Request to create a new cat from matched sightings."""
+    entry_ids: List[int] = Field(..., min_length=1, description="List of entry IDs to link to new cat")
+    name: Optional[str] = Field(None, max_length=100, description="Optional name for the new cat")
+
+
+# -----------------------------------------------------------------------------
+# Phase 4: Area-Based Clustering Models
+# -----------------------------------------------------------------------------
+
+class AreaSighting(BaseModel):
+    """A sighting within a geographic area."""
+    entry_id: int
+    text_preview: str
+    location: Optional[str] = None
+    location_normalized: Optional[str] = None
+    latitude: float
+    longitude: float
+    cat_id: Optional[int] = None
+    cat_name: Optional[str] = None
+    created_at: str
+
+
+class AreaQueryResponse(BaseModel):
+    """Response from area-based sighting query."""
+    center_lat: float
+    center_lon: float
+    radius_meters: int
+    total_count: int
+    unassigned_count: int
+    sightings: List[AreaSighting]
+
+
+class SuggestedGroup(BaseModel):
+    """A suggested grouping of sightings that may belong to the same cat."""
+    group_id: int
+    confidence: float  # 0.0 to 1.0
+    center_lat: float
+    center_lon: float
+    radius_meters: float
+    entry_ids: List[int]
+    reasons: List[str]
+    suggested_name: Optional[str] = None
+
+
+class SuggestedGroupingsResponse(BaseModel):
+    """Response containing suggested sighting groupings."""
+    area_center_lat: float
+    area_center_lon: float
+    area_radius_meters: int
+    total_unassigned: int
+    groups: List[SuggestedGroup]
+
+
+# -----------------------------------------------------------------------------
 # Resilience Patterns for Geocoding (Circuit Breaker, Retry, Fallback)
 # -----------------------------------------------------------------------------
 
@@ -2034,6 +2106,375 @@ def assign_entry_to_cat(entry_id: int, cat_id: int):
         location_lat=updated["location_lat"],
         location_lon=updated["location_lon"],
         location_osm_id=updated["location_osm_id"],
+    )
+
+
+# -----------------------------------------------------------------------------
+# Phase 3: Validation Workflow Endpoints
+# -----------------------------------------------------------------------------
+
+@app.post("/cats/{cat_id}/link-sightings", response_model=LinkSightingsResponse)
+def link_sightings_to_cat(cat_id: int, payload: LinkSightingsRequest):
+    """
+    Bulk link multiple sightings to an existing cat.
+
+    This endpoint allows you to link multiple entries to a cat in a single request,
+    useful after reviewing nearby sightings and confirming they belong to the same cat.
+
+    Returns a summary of:
+    - newly_linked: entries that were successfully linked
+    - already_linked: entries that were already linked to this cat
+    - failed: entries that don't exist
+    """
+    conn = get_conn()
+    cur = get_cursor(conn)
+
+    # Ensure cat exists
+    execute_query(cur, "SELECT id FROM cats WHERE id = ?", (cat_id,))
+    if cur.fetchone() is None:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Cat not found")
+
+    already_linked: List[int] = []
+    newly_linked: List[int] = []
+    failed: List[int] = []
+
+    for entry_id in payload.entry_ids:
+        # Check if entry exists
+        execute_query(cur, "SELECT id, cat_id FROM entries WHERE id = ?", (entry_id,))
+        entry = cur.fetchone()
+
+        if entry is None:
+            failed.append(entry_id)
+            continue
+
+        current_cat_id = entry["cat_id"]
+
+        if current_cat_id == cat_id:
+            # Already linked to this cat
+            already_linked.append(entry_id)
+        else:
+            # Link to the cat (even if previously linked to another cat)
+            execute_query(cur, "UPDATE entries SET cat_id = ? WHERE id = ?", (cat_id, entry_id))
+            newly_linked.append(entry_id)
+
+    conn.commit()
+    conn.close()
+
+    return LinkSightingsResponse(
+        cat_id=cat_id,
+        linked_count=len(newly_linked) + len(already_linked),
+        already_linked=already_linked,
+        newly_linked=newly_linked,
+        failed=failed,
+    )
+
+
+@app.post("/cats/from-sightings", response_model=Cat)
+def create_cat_from_sightings(payload: CreateCatFromSightingsRequest):
+    """
+    Create a new cat and link multiple sightings to it in a single operation.
+
+    This is a convenience endpoint for when you've identified that several
+    unassigned sightings belong to the same (previously unknown) cat.
+
+    The workflow is:
+    1. Create a new cat (with optional name)
+    2. Link all specified entries to the new cat
+    3. Return the new cat
+
+    Note: Entries that are already linked to another cat will be re-linked
+    to the new cat. Entries that don't exist are silently skipped.
+    """
+    created_at = datetime.utcnow().isoformat() + "Z"
+    name = payload.name.strip() if payload.name and payload.name.strip() else None
+
+    conn = get_conn()
+    cur = get_cursor(conn)
+
+    # Create the new cat
+    ph = sql_placeholder()
+    if settings.is_postgres:
+        execute_query(cur,
+            f"INSERT INTO cats (name, createdAt) VALUES ({ph}, {ph}) RETURNING id",
+            (name, created_at),
+        )
+        new_cat_id = cur.fetchone()['id']
+    else:
+        execute_query(cur,
+            f"INSERT INTO cats (name, createdAt) VALUES ({ph}, {ph})",
+            (name, created_at),
+        )
+        new_cat_id = cur.lastrowid
+
+    # Link all specified entries to the new cat
+    for entry_id in payload.entry_ids:
+        # Check if entry exists before updating
+        execute_query(cur, "SELECT id FROM entries WHERE id = ?", (entry_id,))
+        if cur.fetchone() is not None:
+            execute_query(cur, "UPDATE entries SET cat_id = ? WHERE id = ?", (new_cat_id, entry_id))
+
+    conn.commit()
+    conn.close()
+
+    return Cat(id=new_cat_id, name=name, createdAt=created_at)
+
+
+# -----------------------------------------------------------------------------
+# Phase 4: Area-Based Clustering Endpoints
+# -----------------------------------------------------------------------------
+
+@app.get("/entries/by-area", response_model=AreaQueryResponse)
+def get_entries_by_area(
+    lat: float = Query(..., ge=-90, le=90, description="Center latitude"),
+    lon: float = Query(..., ge=-180, le=180, description="Center longitude"),
+    radius: int = Query(500, ge=1, le=10000, description="Search radius in meters"),
+    include_assigned: bool = Query(True, description="Include sightings already linked to cats"),
+):
+    """
+    Query sightings within a geographic area.
+
+    Returns all sightings within the specified radius of the center point.
+    Useful for exploring cat activity in a neighborhood or specific location.
+
+    Parameters:
+    - lat, lon: Center point coordinates
+    - radius: Search radius in meters (1-10000, default 500)
+    - include_assigned: Include sightings already linked to cats (default true)
+    """
+    conn = get_conn()
+    cur = get_cursor(conn)
+
+    # Load all entries with coordinates
+    if include_assigned:
+        execute_query(cur,
+            """
+            SELECT e.id, e.text, e.createdAt, e.location, e.location_normalized,
+                   e.location_lat, e.location_lon, e.cat_id, c.name as cat_name
+            FROM entries e
+            LEFT JOIN cats c ON e.cat_id = c.id
+            WHERE e.location_lat IS NOT NULL AND e.location_lon IS NOT NULL
+            ORDER BY e.id DESC
+            """,
+        )
+    else:
+        execute_query(cur,
+            """
+            SELECT e.id, e.text, e.createdAt, e.location, e.location_normalized,
+                   e.location_lat, e.location_lon, e.cat_id, c.name as cat_name
+            FROM entries e
+            LEFT JOIN cats c ON e.cat_id = c.id
+            WHERE e.location_lat IS NOT NULL AND e.location_lon IS NOT NULL
+                  AND e.cat_id IS NULL
+            ORDER BY e.id DESC
+            """,
+        )
+
+    rows = cur.fetchall()
+    conn.close()
+
+    sightings: List[AreaSighting] = []
+    unassigned_count = 0
+
+    for r in rows:
+        entry_lat = r["location_lat"]
+        entry_lon = r["location_lon"]
+
+        # Calculate distance from center
+        distance = haversine_distance(lat, lon, entry_lat, entry_lon)
+
+        # Skip if outside radius
+        if distance > radius:
+            continue
+
+        # Create text preview (first 100 chars)
+        text_preview = r["text"][:100] + "..." if len(r["text"]) > 100 else r["text"]
+
+        if r["cat_id"] is None:
+            unassigned_count += 1
+
+        sightings.append(
+            AreaSighting(
+                entry_id=r["id"],
+                text_preview=text_preview,
+                location=r["location"],
+                location_normalized=r["location_normalized"],
+                latitude=entry_lat,
+                longitude=entry_lon,
+                cat_id=r["cat_id"],
+                cat_name=r["cat_name"],
+                created_at=row_get(r, "createdAt"),
+            )
+        )
+
+    return AreaQueryResponse(
+        center_lat=lat,
+        center_lon=lon,
+        radius_meters=radius,
+        total_count=len(sightings),
+        unassigned_count=unassigned_count,
+        sightings=sightings,
+    )
+
+
+@app.get("/entries/by-area/suggested-groups", response_model=SuggestedGroupingsResponse)
+def get_suggested_groupings(
+    lat: float = Query(..., ge=-90, le=90, description="Center latitude"),
+    lon: float = Query(..., ge=-180, le=180, description="Center longitude"),
+    radius: int = Query(500, ge=1, le=10000, description="Search radius in meters"),
+    cluster_radius: int = Query(100, ge=10, le=500, description="Clustering radius in meters"),
+    min_sightings: int = Query(2, ge=2, le=10, description="Minimum sightings per group"),
+):
+    """
+    Suggest groupings of unassigned sightings that may belong to the same cat.
+
+    Uses a simple spatial clustering algorithm:
+    1. Find all unassigned sightings in the area
+    2. Group nearby sightings within cluster_radius
+    3. Score groups based on text similarity and proximity
+    4. Return groups with at least min_sightings entries
+
+    Parameters:
+    - lat, lon: Center point coordinates
+    - radius: Search radius in meters (1-10000, default 500)
+    - cluster_radius: Max distance between sightings in a group (10-500m, default 100m)
+    - min_sightings: Minimum sightings to form a group (2-10, default 2)
+    """
+    conn = get_conn()
+    cur = get_cursor(conn)
+
+    # Load unassigned entries with coordinates in the area
+    execute_query(cur,
+        """
+        SELECT id, text, createdAt, location, location_normalized,
+               location_lat, location_lon
+        FROM entries
+        WHERE location_lat IS NOT NULL AND location_lon IS NOT NULL
+              AND cat_id IS NULL
+        ORDER BY id DESC
+        """,
+    )
+
+    rows = cur.fetchall()
+    conn.close()
+
+    # Filter to entries within the search area
+    candidates = []
+    for r in rows:
+        entry_lat = r["location_lat"]
+        entry_lon = r["location_lon"]
+        distance = haversine_distance(lat, lon, entry_lat, entry_lon)
+        if distance <= radius:
+            candidates.append({
+                "id": r["id"],
+                "text": r["text"],
+                "location": r["location"],
+                "lat": entry_lat,
+                "lon": entry_lon,
+                "created_at": row_get(r, "createdAt"),
+                "assigned_to_group": False,
+            })
+
+    # Simple greedy clustering algorithm
+    groups: List[SuggestedGroup] = []
+    group_id = 0
+
+    for i, seed in enumerate(candidates):
+        if seed["assigned_to_group"]:
+            continue
+
+        # Start a new group with this seed
+        group_entries = [seed]
+        seed["assigned_to_group"] = True
+
+        # Find all nearby unassigned entries
+        for j, other in enumerate(candidates):
+            if i == j or other["assigned_to_group"]:
+                continue
+
+            distance = haversine_distance(
+                seed["lat"], seed["lon"],
+                other["lat"], other["lon"]
+            )
+
+            if distance <= cluster_radius:
+                group_entries.append(other)
+                other["assigned_to_group"] = True
+
+        # Only keep groups with minimum sightings
+        if len(group_entries) >= min_sightings:
+            # Calculate group center (average of coordinates)
+            avg_lat = sum(e["lat"] for e in group_entries) / len(group_entries)
+            avg_lon = sum(e["lon"] for e in group_entries) / len(group_entries)
+
+            # Calculate max distance from center (group radius)
+            max_dist = max(
+                haversine_distance(avg_lat, avg_lon, e["lat"], e["lon"])
+                for e in group_entries
+            )
+
+            # Calculate text similarity within group (average pairwise Jaccard)
+            entry_ids = [e["id"] for e in group_entries]
+            texts = [e["text"] for e in group_entries]
+            keyword_sets = [tokenize_keywords(t) for t in texts]
+
+            total_sim = 0.0
+            pair_count = 0
+            for a in range(len(keyword_sets)):
+                for b in range(a + 1, len(keyword_sets)):
+                    total_sim += jaccard_similarity(keyword_sets[a], keyword_sets[b])
+                    pair_count += 1
+
+            avg_text_sim = total_sim / pair_count if pair_count > 0 else 0.0
+
+            # Calculate confidence based on:
+            # - Number of sightings (more = higher)
+            # - Text similarity (higher = more confident)
+            # - Cluster tightness (smaller radius = higher)
+            size_factor = min(1.0, len(group_entries) / 5.0)  # Max at 5 sightings
+            tightness_factor = max(0.0, 1.0 - (max_dist / cluster_radius))
+            confidence = 0.4 * size_factor + 0.3 * avg_text_sim + 0.3 * tightness_factor
+
+            # Build reasons
+            reasons = []
+            reasons.append(f"{len(group_entries)} sightings within {max_dist:.0f}m")
+            if avg_text_sim > 0.2:
+                reasons.append(f"text similarity {avg_text_sim:.2f}")
+            if len(set(e.get("location", "") for e in group_entries if e.get("location"))) == 1:
+                reasons.append("same location text")
+
+            # Generate suggested name based on location
+            locations = [e.get("location") for e in group_entries if e.get("location")]
+            suggested_name = None
+            if locations:
+                # Use most common location as name hint
+                loc_counts = Counter(locations)
+                most_common_loc = loc_counts.most_common(1)[0][0]
+                suggested_name = f"Cat near {most_common_loc[:30]}"
+
+            groups.append(
+                SuggestedGroup(
+                    group_id=group_id,
+                    confidence=round(confidence, 2),
+                    center_lat=avg_lat,
+                    center_lon=avg_lon,
+                    radius_meters=round(max_dist, 1),
+                    entry_ids=entry_ids,
+                    reasons=reasons,
+                    suggested_name=suggested_name,
+                )
+            )
+            group_id += 1
+
+    # Sort groups by confidence (highest first)
+    groups.sort(key=lambda g: g.confidence, reverse=True)
+
+    return SuggestedGroupingsResponse(
+        area_center_lat=lat,
+        area_center_lon=lon,
+        area_radius_meters=radius,
+        total_unassigned=len(candidates),
+        groups=groups,
     )
 
 
