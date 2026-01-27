@@ -31,7 +31,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Literal, Union
-from fastapi import FastAPI, HTTPException, File, UploadFile, Form
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from config import settings
@@ -899,13 +899,17 @@ def cat_profile(cat_id: int):
 
 
 @app.get("/entries/{entry_id}/matches", response_model=List[MatchCandidate])
-def find_matches(entry_id: int, top_k: int = 5, min_score: float = 0.15):
+def find_matches(
+    entry_id: int,
+    top_k: int = Query(5, ge=1, le=20, description="Max number of matches to return"),
+    min_score: float = Query(0.15, ge=0.0, le=1.0, description="Minimum similarity score")
+):
     """
     Suggest possible matches for a given entry.
 
     Parameters:
-    - top_k: return at most N candidates
-    - min_score: ignore candidates below this threshold
+    - top_k: return at most N candidates (1-20, default 5)
+    - min_score: ignore candidates below this threshold (0.0-1.0, default 0.15)
 
     NOTE: This is *not* identity proof. It's a suggestion list.
     """
@@ -1109,9 +1113,9 @@ async def upload_image_endpoint(file: UploadFile = File(...)):
 
 @app.post("/entries/with-image", response_model=Entry)
 async def create_entry_with_image(
-    text: str = Form(...),
-    nickname: Optional[str] = Form(None),
-    location: Optional[str] = Form(None),
+    text: str = Form(..., min_length=1, max_length=5000),
+    nickname: Optional[str] = Form(None, max_length=100),
+    location: Optional[str] = Form(None, max_length=200),
     image: Optional[UploadFile] = File(None)
 ):
     """
@@ -1119,6 +1123,12 @@ async def create_entry_with_image(
 
     This endpoint accepts multipart/form-data instead of JSON.
     Use this when uploading an image along with the entry data.
+
+    Validation:
+    - text: 1-5000 characters (required)
+    - nickname: max 100 characters (optional)
+    - location: max 200 characters (optional)
+    - image: max 10MB, types: jpeg/png/webp/gif (optional)
     """
     # Upload image if provided
     photo_url = None

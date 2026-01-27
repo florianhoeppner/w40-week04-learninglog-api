@@ -197,6 +197,67 @@ python debug_bunny.py  # Tests connectivity, credentials, and permissions
 - **ALWAYS set `DEBUG=True` in test environment** (handled automatically in `conftest.py`)
 - **Reload config module** before main in test fixtures to pick up environment changes
 
+## Security Best Practices
+
+### ✅ What We Do Right
+1. **SQL Injection Protection**: All queries use parameterized statements via `execute_query()` helper
+2. **Production Validation**: Config validation prevents weak secrets and insecure settings in production
+3. **CORS Configuration**: Explicitly configured allowed origins, no wildcards in production
+4. **Image Validation**: File type and size validation for uploads
+5. **Environment-based Secrets**: All secrets loaded from environment variables, not hard-coded
+
+### ⚠️ Security Checklist (CRITICAL - Always Follow)
+
+**1. NEVER Commit Secrets to Repository**
+- ❌ **NEVER** create `.env` files with real secrets in the working directory
+- ❌ **NEVER** hard-code API keys, passwords, or tokens in source code
+- ✅ **ALWAYS** use `.env.example` with placeholder values
+- ✅ **ALWAYS** set secrets via deployment platform (Railway, Vercel, GitHub Secrets)
+- ✅ **ALWAYS** verify `.env` is in `.gitignore` before creating it
+
+**2. ALWAYS Validate User Input**
+- ❌ **NEVER** accept unlimited string lengths in Form() or Query() parameters
+- ❌ **NEVER** trust user input without bounds checking
+- ✅ **ALWAYS** use Pydantic Field() constraints: `min_length`, `max_length`, `ge`, `le`
+- ✅ **ALWAYS** validate both JSON endpoints AND multipart/form-data endpoints
+- ✅ **ALWAYS** set reasonable limits (e.g., text max 5000 chars, top_k max 20)
+
+**3. ALWAYS Use Parameterized SQL Queries**
+- ❌ **NEVER** concatenate user input into SQL strings: `f"SELECT * FROM users WHERE name = '{name}'"`
+- ✅ **ALWAYS** use placeholders: `execute_query(cur, "SELECT * FROM users WHERE name = ?", (name,))`
+- ✅ **ALWAYS** use the `execute_query()` helper function (handles SQLite/PostgreSQL differences)
+
+**4. ALWAYS Audit Dependencies**
+- ❌ **NEVER** install packages you don't actually use
+- ❌ **NEVER** leave authentication libraries (jose, passlib) in requirements if unused
+- ✅ **ALWAYS** verify each dependency is imported and used before adding to requirements.txt
+- ✅ **ALWAYS** remove unused dependencies to reduce attack surface
+- ✅ **ALWAYS** keep dependencies up to date with security patches
+
+### 🔒 Security Audit History
+
+**2026-01-27**: Comprehensive security audit identified and fixed 4 issues:
+1. ✅ **Hard-coded JWT secret in `.env`** - Removed file, rely on Railway environment variables
+2. ✅ **Missing Form() validation** - Added max_length to `POST /entries/with-image` parameters
+3. ✅ **Missing Query() validation** - Added ge/le constraints to `GET /entries/{id}/matches` parameters
+4. ✅ **Unused dependencies** - Removed `python-jose` and `passlib` from requirements.txt
+
+**Lessons Learned**:
+- Even with `.gitignore`, having real secrets in `.env` files is risky (backups, Docker layers, logs)
+- Form-based endpoints need explicit validation - FastAPI doesn't auto-validate like Pydantic models
+- Query parameters without limits can cause DoS attacks via memory exhaustion
+- Unused dependencies increase Docker image size and create unnecessary security vulnerabilities
+
+### 🛡️ Pre-Commit Security Checklist
+
+Before committing code, verify:
+- [ ] No secrets in source code or `.env` files
+- [ ] All user input has validation (strings have max_length, numbers have ge/le)
+- [ ] All SQL queries use parameterized statements
+- [ ] All dependencies in requirements.txt are actually imported and used
+- [ ] No wildcard CORS origins in production
+- [ ] Production validation tests pass with `DEBUG=False`
+
 ## Common Tasks
 ### Backend
 ```bash
@@ -454,6 +515,76 @@ def bunny_storage_url(self) -> Optional[str]:
 - `syd` → `syd.storage.bunnycdn.com`
 
 **Takeaway**: CDN providers may use different endpoint patterns for their default vs regional data centers. Always check the actual API documentation for endpoint formats. The retry logic correctly identified it as a connection issue, not an authentication problem.
+
+### 9. Security Audit - Input Validation and Dependency Management (2026-01-27)
+**Problem**: Security audit revealed 4 categories of vulnerabilities in production code.
+
+**Findings**:
+
+1. **Hard-coded Secrets** (Medium severity):
+   - Real JWT secret stored in `backend/.env` file (even though gitignored)
+   - Risk: File could be exposed via backups, Docker layers, CI logs, or filesystem access
+
+2. **Missing Input Validation** (High severity):
+   - `POST /entries/with-image` accepted unlimited text lengths via Form() parameters
+   - `GET /entries/{id}/matches` allowed unlimited `top_k` parameter
+   - Risk: Memory exhaustion DoS attacks, database failures
+   - Example attack: `POST /entries/with-image` with 1GB text field
+
+3. **Unused Dependencies** (Low severity):
+   - `python-jose[cryptography]==3.3.0` - Not imported anywhere (auth planned but never implemented)
+   - `passlib[bcrypt]==1.7.4` - Not imported anywhere (password hashing planned but never implemented)
+   - Risk: Unnecessary attack surface, larger Docker images, potential vulnerabilities in unused code
+
+4. **SQL Injection** - ✅ No issues found (all queries properly parameterized)
+
+**Solution**:
+```python
+# Before (vulnerable):
+async def create_entry_with_image(
+    text: str = Form(...),              # ❌ Unlimited length
+    nickname: Optional[str] = Form(None),  # ❌ Unlimited length
+    location: Optional[str] = Form(None),  # ❌ Unlimited length
+    image: Optional[UploadFile] = File(None)
+):
+
+def find_matches(entry_id: int, top_k: int = 5, min_score: float = 0.15):  # ❌ No limits
+
+# After (secure):
+async def create_entry_with_image(
+    text: str = Form(..., min_length=1, max_length=5000),  # ✅ Limited
+    nickname: Optional[str] = Form(None, max_length=100),   # ✅ Limited
+    location: Optional[str] = Form(None, max_length=200),   # ✅ Limited
+    image: Optional[UploadFile] = File(None)
+):
+
+def find_matches(
+    entry_id: int,
+    top_k: int = Query(5, ge=1, le=20),         # ✅ Bounded
+    min_score: float = Query(0.15, ge=0.0, le=1.0)  # ✅ Bounded
+):
+```
+
+**Actions Taken**:
+1. ✅ Removed `backend/.env` file completely (Railway provides secrets)
+2. ✅ Added validation to Form() parameters matching JSON endpoint constraints
+3. ✅ Added Query() parameter validation with ge/le bounds
+4. ✅ Removed unused dependencies: `python-jose`, `passlib`
+5. ✅ Added Security Best Practices section to claude.md
+6. ✅ Created pre-commit security checklist
+
+**Why This Happened**:
+- Form-based endpoints don't inherit Pydantic model validation automatically
+- Query parameters default to Python's unlimited int/float ranges
+- Dependencies were added for planned features (auth) but never removed when those features were cut
+- `.env` file was created for local testing and not cleaned up
+
+**Takeaway**:
+- **Always validate user input explicitly** - Form() and Query() parameters need validation even if JSON endpoints are protected
+- **Never create `.env` files with real secrets** - Use `.env.example` with placeholders only
+- **Audit dependencies regularly** - Remove unused packages to reduce attack surface
+- **Security is not automatic** - Even with good practices (parameterized SQL), subtle issues can creep in
+- **Security audits should be routine** - Schedule regular reviews, especially before major releases
 
 ## Troubleshooting
 
