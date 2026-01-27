@@ -21,21 +21,38 @@ This file includes:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
+import random
 import re
 import sqlite3
 import os
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from math import radians, cos, sin, asin, sqrt
 from pathlib import Path
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Optional, Literal, Union
+from typing import List, Optional, Literal, Union, TypeVar, Callable, Awaitable
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from config import settings
 from image_upload import upload_to_bunny, delete_from_bunny, validate_bunny_config
+
+# Async HTTP client for geocoding
+try:
+    import httpx
+    HTTPX_AVAILABLE = True
+except ImportError:
+    HTTPX_AVAILABLE = False
+
+# Logger for geocoding operations
+logger = logging.getLogger(__name__)
 
 # PostgreSQL support
 try:
@@ -250,6 +267,10 @@ def init_db() -> None:
             location TEXT,
             cat_id {int_type},
             photo_url TEXT,
+            location_normalized TEXT,
+            location_lat REAL,
+            location_lon REAL,
+            location_osm_id TEXT,
             FOREIGN KEY(cat_id) REFERENCES cats(id) ON DELETE SET NULL
         )
         """
@@ -262,6 +283,12 @@ def init_db() -> None:
         _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN location TEXT")
         _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN cat_id INTEGER")
         _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN photo_url TEXT")
+
+    # Location normalization columns (Phase 1 - OpenStreetMap integration)
+    _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN location_normalized TEXT")
+    _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN location_lat REAL")
+    _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN location_lon REAL")
+    _try_alter_table(cur, "ALTER TABLE entries ADD COLUMN location_osm_id TEXT")
 
     # --- Analyses table - depends on entries ---
     execute_query(cur,
@@ -344,8 +371,13 @@ class Entry(BaseModel):
     isFavorite: bool
     nickname: Optional[str] = None
     location: Optional[str] = None
-    cat_id: Optional[int] = None       # NEW
-    photo_url: Optional[str] = None    # NEW
+    cat_id: Optional[int] = None
+    photo_url: Optional[str] = None
+    # Location normalization fields (OpenStreetMap)
+    location_normalized: Optional[str] = None
+    location_lat: Optional[float] = None
+    location_lon: Optional[float] = None
+    location_osm_id: Optional[str] = None
 
 class EntryAnalysis(BaseModel):
     """
@@ -414,6 +446,341 @@ class CatInsightResponse(BaseModel):
     suggested_actions: List[str]
     citations: List[Citation]
     generatedAt: str
+
+
+class LocationNormalizationResult(BaseModel):
+    """Result of normalizing a location via OpenStreetMap Nominatim."""
+    entry_id: int
+    original_location: str
+    normalized_location: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    osm_id: Optional[str] = None
+    status: str  # "success", "not_found", "already_normalized", "no_location", "error"
+    message: Optional[str] = None
+
+
+class NearbySighting(BaseModel):
+    """A sighting found near another sighting."""
+    entry_id: int
+    distance_meters: float
+    location: Optional[str] = None
+    location_normalized: Optional[str] = None
+    text_preview: str
+    cat_id: Optional[int] = None
+    cat_name: Optional[str] = None
+    created_at: str
+    match_score: float
+    reasons: List[str]
+
+
+class GeocodingHealthResponse(BaseModel):
+    """Health check for geocoding service."""
+    service: str
+    circuit_state: str
+    failure_count: int
+    last_failure: Optional[str] = None
+    status: str  # "healthy", "degraded", "unavailable"
+
+
+# -----------------------------------------------------------------------------
+# Resilience Patterns for Geocoding (Circuit Breaker, Retry, Fallback)
+# -----------------------------------------------------------------------------
+
+class CircuitState(Enum):
+    """Circuit breaker states."""
+    CLOSED = "closed"      # Normal operation
+    OPEN = "open"          # Failing, reject requests
+    HALF_OPEN = "half_open"  # Testing if service recovered
+
+
+@dataclass
+class CircuitBreaker:
+    """
+    Circuit breaker pattern to prevent cascading failures.
+
+    States:
+    - CLOSED: Normal operation, requests flow through
+    - OPEN: Service is down, requests fail fast
+    - HALF_OPEN: Testing if service recovered
+    """
+    failure_threshold: int = 5
+    recovery_timeout: float = 60.0
+    half_open_max_calls: int = 3
+
+    _failure_count: int = field(default=0, repr=False)
+    _last_failure_time: Optional[datetime] = field(default=None, repr=False)
+    _state: CircuitState = field(default=CircuitState.CLOSED, repr=False)
+    _half_open_calls: int = field(default=0, repr=False)
+
+    def can_execute(self) -> bool:
+        """Check if a request should be allowed through."""
+        if self._state == CircuitState.CLOSED:
+            return True
+        if self._state == CircuitState.OPEN:
+            if self._last_failure_time and \
+               datetime.now() - self._last_failure_time > timedelta(seconds=self.recovery_timeout):
+                self._state = CircuitState.HALF_OPEN
+                self._half_open_calls = 0
+                return True
+            return False
+        if self._state == CircuitState.HALF_OPEN:
+            return self._half_open_calls < self.half_open_max_calls
+        return False
+
+    def record_success(self):
+        """Record a successful call."""
+        if self._state == CircuitState.HALF_OPEN:
+            self._half_open_calls += 1
+            if self._half_open_calls >= self.half_open_max_calls:
+                self._state = CircuitState.CLOSED
+                self._failure_count = 0
+        else:
+            self._failure_count = 0
+
+    def record_failure(self):
+        """Record a failed call."""
+        self._failure_count += 1
+        self._last_failure_time = datetime.now()
+        if self._failure_count >= self.failure_threshold:
+            self._state = CircuitState.OPEN
+
+    def get_state(self) -> str:
+        """Get the current state as a string."""
+        return self._state.value
+
+
+# Global circuit breaker for Nominatim API
+nominatim_circuit = CircuitBreaker()
+
+# Rate limiting for Nominatim (1 request per second)
+_last_nominatim_call: float = 0.0
+
+# Type variable for retry function
+T = TypeVar('T')
+
+
+async def retry_with_backoff(
+    func: Callable[[], Awaitable[T]],
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    exponential_base: float = 2.0,
+    jitter: bool = True,
+) -> T:
+    """
+    Retry an async function with exponential backoff.
+
+    Args:
+        func: Async function to retry
+        max_retries: Maximum number of retry attempts
+        base_delay: Initial delay in seconds
+        max_delay: Maximum delay cap in seconds
+        exponential_base: Base for exponential calculation
+        jitter: Add randomness to prevent thundering herd
+    """
+    last_exception = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            return await func()
+        except Exception as e:
+            last_exception = e
+
+            if attempt == max_retries:
+                break
+
+            # Calculate delay with exponential backoff
+            delay = min(base_delay * (exponential_base ** attempt), max_delay)
+
+            # Add jitter (±25%)
+            if jitter:
+                delay = delay * (0.75 + random.random() * 0.5)
+
+            await asyncio.sleep(delay)
+
+    raise last_exception
+
+
+# -----------------------------------------------------------------------------
+# Geographic Distance Calculation (Haversine Formula)
+# -----------------------------------------------------------------------------
+
+def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    Calculate the great-circle distance between two points in meters.
+
+    Uses the Haversine formula for accurate distance on a sphere.
+
+    Args:
+        lat1, lon1: Coordinates of first point (degrees)
+        lat2, lon2: Coordinates of second point (degrees)
+
+    Returns:
+        Distance in meters
+    """
+    R = 6371000  # Earth's radius in meters
+
+    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+
+    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+    c = 2 * asin(sqrt(a))
+
+    return R * c
+
+
+# -----------------------------------------------------------------------------
+# OpenStreetMap Nominatim Geocoding
+# -----------------------------------------------------------------------------
+
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+NOMINATIM_USER_AGENT = "CatAtlas/1.0 (cat-sighting-tracker)"
+
+
+async def geocode_location(location: str) -> Optional[dict]:
+    """
+    Geocode a location string using OpenStreetMap Nominatim.
+
+    Args:
+        location: Free-text location string
+
+    Returns:
+        Dict with display_name, lat, lon, osm_id or None if not found
+    """
+    global _last_nominatim_call
+
+    if not HTTPX_AVAILABLE:
+        logger.warning("httpx not available, geocoding disabled")
+        return None
+
+    # Respect rate limit (1 request per second)
+    elapsed = time.time() - _last_nominatim_call
+    if elapsed < 1.0:
+        await asyncio.sleep(1.0 - elapsed)
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                NOMINATIM_URL,
+                params={
+                    "q": location,
+                    "format": "json",
+                    "limit": 1,
+                    "addressdetails": 1,
+                },
+                headers={"User-Agent": NOMINATIM_USER_AGENT},
+                timeout=10.0,
+            )
+            _last_nominatim_call = time.time()
+
+            if response.status_code == 200:
+                results = response.json()
+                if results:
+                    return results[0]
+    except Exception as e:
+        logger.warning(f"Geocoding error for '{location}': {e}")
+
+    return None
+
+
+async def geocode_with_fallback(location: str) -> dict:
+    """
+    Geocode with circuit breaker, retry, and fallback strategies.
+
+    Fallback order:
+    1. OpenStreetMap Nominatim (primary)
+    2. Cached results from similar locations in database
+    3. Text-only result (no coordinates)
+    """
+    # Check circuit breaker
+    if not nominatim_circuit.can_execute():
+        logger.info(f"Circuit breaker open, using fallback for '{location}'")
+        return _fallback_to_text(location)
+
+    try:
+        result = await retry_with_backoff(
+            lambda: geocode_location(location),
+            max_retries=2,
+            base_delay=1.0,
+        )
+        if result:
+            nominatim_circuit.record_success()
+            return {
+                "display_name": result.get("display_name"),
+                "lat": result.get("lat"),
+                "lon": result.get("lon"),
+                "osm_id": str(result.get("osm_id", "")),
+                "fallback": None,
+            }
+        else:
+            # Location not found, but API worked
+            nominatim_circuit.record_success()
+            return _fallback_to_text(location, status="not_found")
+    except Exception as e:
+        nominatim_circuit.record_failure()
+        logger.warning(f"Geocoding failed for '{location}': {e}")
+        return _fallback_to_text(location, status="error")
+
+
+def _fallback_to_text(location: str, status: str = "fallback") -> dict:
+    """Return text-only result when geocoding fails."""
+    return {
+        "display_name": location,
+        "lat": None,
+        "lon": None,
+        "osm_id": None,
+        "fallback": status,
+    }
+
+
+def find_similar_cached_location(conn, location: str) -> Optional[dict]:
+    """
+    Find a similar location that has already been geocoded.
+
+    Uses simple token matching to find locations with similar text.
+    """
+    cur = get_cursor(conn)
+    execute_query(cur,
+        """
+        SELECT location, location_normalized, location_lat, location_lon, location_osm_id
+        FROM entries
+        WHERE location_normalized IS NOT NULL
+          AND location_lat IS NOT NULL
+        LIMIT 100
+        """,
+    )
+    rows = cur.fetchall()
+
+    # Tokenize the search location
+    search_tokens = set(location.lower().split())
+
+    best_match = None
+    best_score = 0.0
+
+    for row in rows:
+        stored_location = row["location"] or ""
+        stored_tokens = set(stored_location.lower().split())
+
+        if not stored_tokens:
+            continue
+
+        # Calculate Jaccard similarity
+        intersection = len(search_tokens & stored_tokens)
+        union = len(search_tokens | stored_tokens)
+        if union > 0:
+            score = intersection / union
+            if score > best_score and score > 0.5:  # Threshold of 50% match
+                best_score = score
+                best_match = {
+                    "location_normalized": row["location_normalized"],
+                    "location_lat": row["location_lat"],
+                    "location_lon": row["location_lon"],
+                    "location_osm_id": row["location_osm_id"],
+                }
+
+    return best_match
 
 
 # -----------------------------------------------------------------------------
@@ -986,9 +1353,10 @@ def get_entries():
     """
     conn = get_conn()
     cur = get_cursor(conn)
-    execute_query(cur, 
+    execute_query(cur,
     """
-    SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url
+    SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url,
+           location_normalized, location_lat, location_lon, location_osm_id
     FROM entries
     ORDER BY id DESC
     """
@@ -1008,6 +1376,10 @@ def get_entries():
                 location=r["location"],
                 cat_id=r["cat_id"],
                 photo_url=r["photo_url"],
+                location_normalized=r["location_normalized"],
+                location_lat=r["location_lat"],
+                location_lon=r["location_lon"],
+                location_osm_id=r["location_osm_id"],
             )
         )
     return result
@@ -1089,6 +1461,10 @@ def create_entry(payload: EntryCreate):
         location=location,
         cat_id=None,
         photo_url=photo_url,
+        location_normalized=None,
+        location_lat=None,
+        location_lon=None,
+        location_osm_id=None,
     )
 
 
@@ -1273,6 +1649,128 @@ def toggle_favorite(entry_id: int):
     )
 
 
+@app.post("/entries/{entry_id}/normalize-location", response_model=LocationNormalizationResult)
+async def normalize_entry_location(entry_id: int, force: bool = Query(False, description="Re-normalize even if already done")):
+    """
+    Normalize the location of an entry using OpenStreetMap Nominatim.
+
+    This validates and standardizes the location, adding:
+    - Normalized display name
+    - Latitude and longitude coordinates
+    - OpenStreetMap ID for deduplication
+
+    Parameters:
+    - force: Re-normalize even if location is already normalized
+    """
+    conn = get_conn()
+    cur = get_cursor(conn)
+
+    # Fetch the entry
+    execute_query(cur,
+        """
+        SELECT id, location, location_normalized, location_lat, location_lon, location_osm_id
+        FROM entries
+        WHERE id = ?
+        """,
+        (entry_id,),
+    )
+    row = cur.fetchone()
+
+    if row is None:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+    original_location = row["location"]
+
+    # Check if entry has a location
+    if not original_location:
+        conn.close()
+        return LocationNormalizationResult(
+            entry_id=entry_id,
+            original_location="",
+            status="no_location",
+            message="Entry has no location to normalize",
+        )
+
+    # Check if already normalized (unless force=True)
+    if not force and row["location_normalized"] and row["location_lat"]:
+        conn.close()
+        return LocationNormalizationResult(
+            entry_id=entry_id,
+            original_location=original_location,
+            normalized_location=row["location_normalized"],
+            latitude=row["location_lat"],
+            longitude=row["location_lon"],
+            osm_id=row["location_osm_id"],
+            status="already_normalized",
+            message="Location already normalized. Use force=true to re-normalize.",
+        )
+
+    # Try geocoding with fallback
+    geo_result = await geocode_with_fallback(original_location)
+
+    # Check if we got coordinates
+    if geo_result.get("lat") and geo_result.get("lon"):
+        # Update the entry with normalized data
+        execute_query(cur,
+            """
+            UPDATE entries
+            SET location_normalized = ?,
+                location_lat = ?,
+                location_lon = ?,
+                location_osm_id = ?
+            WHERE id = ?
+            """,
+            (
+                geo_result["display_name"],
+                float(geo_result["lat"]),
+                float(geo_result["lon"]),
+                geo_result.get("osm_id"),
+                entry_id,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        return LocationNormalizationResult(
+            entry_id=entry_id,
+            original_location=original_location,
+            normalized_location=geo_result["display_name"],
+            latitude=float(geo_result["lat"]),
+            longitude=float(geo_result["lon"]),
+            osm_id=geo_result.get("osm_id"),
+            status="success",
+            message="Location normalized successfully",
+        )
+    else:
+        # Geocoding failed or location not found
+        conn.close()
+        fallback_status = geo_result.get("fallback", "error")
+        return LocationNormalizationResult(
+            entry_id=entry_id,
+            original_location=original_location,
+            normalized_location=geo_result.get("display_name"),
+            status=fallback_status if fallback_status != "not_found" else "not_found",
+            message=f"Could not geocode location: {fallback_status}",
+        )
+
+
+@app.get("/health/geocoding", response_model=GeocodingHealthResponse)
+def geocoding_health():
+    """
+    Health check for the geocoding service.
+
+    Returns circuit breaker state and service availability.
+    """
+    return GeocodingHealthResponse(
+        service="nominatim",
+        circuit_state=nominatim_circuit.get_state(),
+        failure_count=nominatim_circuit._failure_count,
+        last_failure=nominatim_circuit._last_failure_time.isoformat() if nominatim_circuit._last_failure_time else None,
+        status="healthy" if nominatim_circuit._state == CircuitState.CLOSED else "degraded",
+    )
+
+
 @app.get("/cats", response_model=List[Cat])
 def list_cats():
     conn = get_conn()
@@ -1328,8 +1826,10 @@ def assign_entry_to_cat(entry_id: int, cat_id: int):
         raise HTTPException(status_code=404, detail="Cat not found")
 
     # Ensure entry exists
-    execute_query(cur, 
-        "SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url FROM entries WHERE id = ?",
+    execute_query(cur,
+        """SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url,
+                  location_normalized, location_lat, location_lon, location_osm_id
+           FROM entries WHERE id = ?""",
         (entry_id,),
     )
     row = cur.fetchone()
@@ -1342,8 +1842,10 @@ def assign_entry_to_cat(entry_id: int, cat_id: int):
     conn.commit()
 
     # Return updated entry
-    execute_query(cur, 
-        "SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url FROM entries WHERE id = ?",
+    execute_query(cur,
+        """SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url,
+                  location_normalized, location_lat, location_lon, location_osm_id
+           FROM entries WHERE id = ?""",
         (entry_id,),
     )
     updated = cur.fetchone()
@@ -1358,6 +1860,10 @@ def assign_entry_to_cat(entry_id: int, cat_id: int):
         location=updated["location"],
         cat_id=updated["cat_id"],
         photo_url=updated["photo_url"],
+        location_normalized=updated["location_normalized"],
+        location_lat=updated["location_lat"],
+        location_lon=updated["location_lon"],
+        location_osm_id=updated["location_osm_id"],
     )
 
 
