@@ -874,18 +874,25 @@ def compute_match_score(
     base_location: str,
     cand_text: str,
     cand_location: str,
+    base_lat: Optional[float] = None,
+    base_lon: Optional[float] = None,
+    cand_lat: Optional[float] = None,
+    cand_lon: Optional[float] = None,
 ) -> tuple[float, list[str]]:
     """
     Combine text similarity + location similarity into one score.
 
-    Weighting (simple but effective):
-    - 70% text similarity
-    - 30% location similarity
+    Enhanced scoring with geographic distance when coordinates available:
+    - 50% text similarity
+    - 50% location score (geographic distance if coords available, else text-based)
+
+    Falls back to text-only matching (70/30 split) when no coordinates.
 
     We also return "reasons" for transparency in UI.
     """
     reasons: list[str] = []
 
+    # Text similarity
     base_kw = tokenize_keywords(base_text)
     cand_kw = tokenize_keywords(cand_text)
     text_sim = jaccard_similarity(base_kw, cand_kw)
@@ -893,13 +900,34 @@ def compute_match_score(
     if text_sim > 0:
         reasons.append(f"text similarity {text_sim:.2f}")
 
-    loc_sim = 0.0
-    if base_location and cand_location:
-        loc_sim = location_similarity(base_location, cand_location)
-        if loc_sim > 0:
-            reasons.append(f"location similarity {loc_sim:.2f}")
+    # Location score - prefer geographic distance when coordinates available
+    loc_score = 0.0
+    has_coords = (base_lat is not None and base_lon is not None and
+                  cand_lat is not None and cand_lon is not None)
 
-    score = 0.7 * text_sim + 0.3 * loc_sim
+    if has_coords:
+        # Use geographic distance
+        distance = haversine_distance(base_lat, base_lon, cand_lat, cand_lon)
+
+        # Convert distance to similarity score (closer = higher)
+        # 0m = 1.0, 100m = 0.9, 500m = 0.5, 1000m+ = 0.0
+        if distance < 1000:
+            loc_score = max(0.0, 1.0 - (distance / 1000))
+            reasons.append(f"distance {distance:.0f}m (score {loc_score:.2f})")
+        else:
+            reasons.append(f"distance {distance:.0f}m (too far)")
+
+        # Use 50/50 weighting when we have coordinates
+        score = 0.5 * text_sim + 0.5 * loc_score
+    else:
+        # Fallback to text-based location similarity
+        if base_location and cand_location:
+            loc_score = location_similarity(base_location, cand_location)
+            if loc_score > 0:
+                reasons.append(f"location text similarity {loc_score:.2f}")
+
+        # Use original 70/30 weighting for text-only matching
+        score = 0.7 * text_sim + 0.3 * loc_score
 
     # If no reasons, still make it explicit
     if not reasons:
@@ -1274,6 +1302,9 @@ def find_matches(
     """
     Suggest possible matches for a given entry.
 
+    Uses geographic distance when coordinates are available (from location normalization),
+    otherwise falls back to text-based matching.
+
     Parameters:
     - top_k: return at most N candidates (1-20, default 5)
     - min_score: ignore candidates below this threshold (0.0-1.0, default 0.15)
@@ -1283,10 +1314,10 @@ def find_matches(
     conn = get_conn()
     cur = get_cursor(conn)
 
-    # 1) Load the base entry
-    execute_query(cur, 
+    # 1) Load the base entry with coordinates
+    execute_query(cur,
         """
-        SELECT id, text, location
+        SELECT id, text, location, location_lat, location_lon
         FROM entries
         WHERE id = ?
         """,
@@ -1299,11 +1330,13 @@ def find_matches(
 
     base_text = base["text"]
     base_location = base["location"] or ""
+    base_lat = base["location_lat"]
+    base_lon = base["location_lon"]
 
-    # 2) Load all other candidates
-    execute_query(cur, 
+    # 2) Load all other candidates with coordinates
+    execute_query(cur,
         """
-        SELECT id, text, createdAt, nickname, location
+        SELECT id, text, createdAt, nickname, location, location_lat, location_lon
         FROM entries
         WHERE id != ?
         ORDER BY id DESC
@@ -1315,16 +1348,22 @@ def find_matches(
 
     candidates: list[MatchCandidate] = []
 
-    # 3) Score each candidate
+    # 3) Score each candidate using coordinates when available
     for r in rows:
         cand_text = r["text"]
         cand_location = r["location"] or ""
+        cand_lat = r["location_lat"]
+        cand_lon = r["location_lon"]
 
         score, reasons = compute_match_score(
             base_text=base_text,
             base_location=base_location,
             cand_text=cand_text,
             cand_location=cand_location,
+            base_lat=base_lat,
+            base_lon=base_lon,
+            cand_lat=cand_lat,
+            cand_lon=cand_lon,
         )
 
         if score >= min_score:
@@ -1344,6 +1383,137 @@ def find_matches(
     # 4) Sort by score descending and return top_k
     candidates.sort(key=lambda x: x.score, reverse=True)
     return candidates[: max(1, min(top_k, 20))]
+
+
+@app.get("/entries/{entry_id}/nearby", response_model=List[NearbySighting])
+def find_nearby_sightings(
+    entry_id: int,
+    radius_meters: int = Query(500, ge=1, le=5000, description="Search radius in meters"),
+    top_k: int = Query(10, ge=1, le=50, description="Max number of results"),
+    include_assigned: bool = Query(True, description="Include sightings already linked to cats"),
+):
+    """
+    Find sightings within a geographic radius of the given entry.
+
+    Requires the entry to have normalized coordinates (location_lat, location_lon).
+    Use POST /entries/{id}/normalize-location first if coordinates are missing.
+
+    Parameters:
+    - radius_meters: Search radius (1-5000m, default 500m)
+    - top_k: Max results to return (1-50, default 10)
+    - include_assigned: Include sightings already linked to cats (default true)
+
+    Returns sightings sorted by distance (closest first).
+    """
+    conn = get_conn()
+    cur = get_cursor(conn)
+
+    # 1) Load the base entry with coordinates
+    execute_query(cur,
+        """
+        SELECT id, text, location, location_normalized, location_lat, location_lon
+        FROM entries
+        WHERE id = ?
+        """,
+        (entry_id,),
+    )
+    base = cur.fetchone()
+    if base is None:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+    base_lat = base["location_lat"]
+    base_lon = base["location_lon"]
+
+    if base_lat is None or base_lon is None:
+        conn.close()
+        raise HTTPException(
+            status_code=400,
+            detail="Entry has no coordinates. Use POST /entries/{id}/normalize-location first."
+        )
+
+    base_text = base["text"]
+    base_location = base["location"] or ""
+
+    # 2) Load all other entries with coordinates
+    if include_assigned:
+        execute_query(cur,
+            """
+            SELECT e.id, e.text, e.createdAt, e.nickname, e.location,
+                   e.location_normalized, e.location_lat, e.location_lon,
+                   e.cat_id, c.name as cat_name
+            FROM entries e
+            LEFT JOIN cats c ON e.cat_id = c.id
+            WHERE e.id != ? AND e.location_lat IS NOT NULL AND e.location_lon IS NOT NULL
+            ORDER BY e.id DESC
+            """,
+            (entry_id,),
+        )
+    else:
+        execute_query(cur,
+            """
+            SELECT e.id, e.text, e.createdAt, e.nickname, e.location,
+                   e.location_normalized, e.location_lat, e.location_lon,
+                   e.cat_id, c.name as cat_name
+            FROM entries e
+            LEFT JOIN cats c ON e.cat_id = c.id
+            WHERE e.id != ? AND e.location_lat IS NOT NULL AND e.location_lon IS NOT NULL
+                  AND e.cat_id IS NULL
+            ORDER BY e.id DESC
+            """,
+            (entry_id,),
+        )
+
+    rows = cur.fetchall()
+    conn.close()
+
+    nearby: list[NearbySighting] = []
+
+    # 3) Calculate distance and score for each candidate
+    for r in rows:
+        cand_lat = r["location_lat"]
+        cand_lon = r["location_lon"]
+
+        # Calculate geographic distance
+        distance = haversine_distance(base_lat, base_lon, cand_lat, cand_lon)
+
+        # Skip if outside radius
+        if distance > radius_meters:
+            continue
+
+        # Calculate match score
+        score, reasons = compute_match_score(
+            base_text=base_text,
+            base_location=base_location,
+            cand_text=r["text"],
+            cand_location=r["location"] or "",
+            base_lat=base_lat,
+            base_lon=base_lon,
+            cand_lat=cand_lat,
+            cand_lon=cand_lon,
+        )
+
+        # Create text preview (first 100 chars)
+        text_preview = r["text"][:100] + "..." if len(r["text"]) > 100 else r["text"]
+
+        nearby.append(
+            NearbySighting(
+                entry_id=r["id"],
+                distance_meters=round(distance, 1),
+                location=r["location"],
+                location_normalized=r["location_normalized"],
+                text_preview=text_preview,
+                cat_id=r["cat_id"],
+                cat_name=r["cat_name"],
+                created_at=row_get(r, "createdAt"),
+                match_score=round(score, 3),
+                reasons=reasons,
+            )
+        )
+
+    # 4) Sort by distance (closest first) and return top_k
+    nearby.sort(key=lambda x: x.distance_meters)
+    return nearby[:top_k]
 
 
 @app.get("/entries", response_model=List[Entry])
