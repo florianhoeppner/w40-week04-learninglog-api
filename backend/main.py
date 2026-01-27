@@ -484,6 +484,30 @@ class GeocodingHealthResponse(BaseModel):
 
 
 # -----------------------------------------------------------------------------
+# Phase 3: Validation Workflow Models
+# -----------------------------------------------------------------------------
+
+class LinkSightingsRequest(BaseModel):
+    """Request to bulk link sightings to an existing cat."""
+    entry_ids: List[int] = Field(..., min_length=1, description="List of entry IDs to link")
+
+
+class LinkSightingsResponse(BaseModel):
+    """Response from bulk linking sightings to a cat."""
+    cat_id: int
+    linked_count: int
+    already_linked: List[int]
+    newly_linked: List[int]
+    failed: List[int]
+
+
+class CreateCatFromSightingsRequest(BaseModel):
+    """Request to create a new cat from matched sightings."""
+    entry_ids: List[int] = Field(..., min_length=1, description="List of entry IDs to link to new cat")
+    name: Optional[str] = Field(None, max_length=100, description="Optional name for the new cat")
+
+
+# -----------------------------------------------------------------------------
 # Resilience Patterns for Geocoding (Circuit Breaker, Retry, Fallback)
 # -----------------------------------------------------------------------------
 
@@ -2035,6 +2059,117 @@ def assign_entry_to_cat(entry_id: int, cat_id: int):
         location_lon=updated["location_lon"],
         location_osm_id=updated["location_osm_id"],
     )
+
+
+# -----------------------------------------------------------------------------
+# Phase 3: Validation Workflow Endpoints
+# -----------------------------------------------------------------------------
+
+@app.post("/cats/{cat_id}/link-sightings", response_model=LinkSightingsResponse)
+def link_sightings_to_cat(cat_id: int, payload: LinkSightingsRequest):
+    """
+    Bulk link multiple sightings to an existing cat.
+
+    This endpoint allows you to link multiple entries to a cat in a single request,
+    useful after reviewing nearby sightings and confirming they belong to the same cat.
+
+    Returns a summary of:
+    - newly_linked: entries that were successfully linked
+    - already_linked: entries that were already linked to this cat
+    - failed: entries that don't exist
+    """
+    conn = get_conn()
+    cur = get_cursor(conn)
+
+    # Ensure cat exists
+    execute_query(cur, "SELECT id FROM cats WHERE id = ?", (cat_id,))
+    if cur.fetchone() is None:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Cat not found")
+
+    already_linked: List[int] = []
+    newly_linked: List[int] = []
+    failed: List[int] = []
+
+    for entry_id in payload.entry_ids:
+        # Check if entry exists
+        execute_query(cur, "SELECT id, cat_id FROM entries WHERE id = ?", (entry_id,))
+        entry = cur.fetchone()
+
+        if entry is None:
+            failed.append(entry_id)
+            continue
+
+        current_cat_id = entry["cat_id"]
+
+        if current_cat_id == cat_id:
+            # Already linked to this cat
+            already_linked.append(entry_id)
+        else:
+            # Link to the cat (even if previously linked to another cat)
+            execute_query(cur, "UPDATE entries SET cat_id = ? WHERE id = ?", (cat_id, entry_id))
+            newly_linked.append(entry_id)
+
+    conn.commit()
+    conn.close()
+
+    return LinkSightingsResponse(
+        cat_id=cat_id,
+        linked_count=len(newly_linked) + len(already_linked),
+        already_linked=already_linked,
+        newly_linked=newly_linked,
+        failed=failed,
+    )
+
+
+@app.post("/cats/from-sightings", response_model=Cat)
+def create_cat_from_sightings(payload: CreateCatFromSightingsRequest):
+    """
+    Create a new cat and link multiple sightings to it in a single operation.
+
+    This is a convenience endpoint for when you've identified that several
+    unassigned sightings belong to the same (previously unknown) cat.
+
+    The workflow is:
+    1. Create a new cat (with optional name)
+    2. Link all specified entries to the new cat
+    3. Return the new cat
+
+    Note: Entries that are already linked to another cat will be re-linked
+    to the new cat. Entries that don't exist are silently skipped.
+    """
+    created_at = datetime.utcnow().isoformat() + "Z"
+    name = payload.name.strip() if payload.name and payload.name.strip() else None
+
+    conn = get_conn()
+    cur = get_cursor(conn)
+
+    # Create the new cat
+    ph = sql_placeholder()
+    if settings.is_postgres:
+        execute_query(cur,
+            f"INSERT INTO cats (name, createdAt) VALUES ({ph}, {ph}) RETURNING id",
+            (name, created_at),
+        )
+        new_cat_id = cur.fetchone()['id']
+    else:
+        execute_query(cur,
+            f"INSERT INTO cats (name, createdAt) VALUES ({ph}, {ph})",
+            (name, created_at),
+        )
+        new_cat_id = cur.lastrowid
+
+    # Link all specified entries to the new cat
+    for entry_id in payload.entry_ids:
+        # Check if entry exists before updating
+        execute_query(cur, "SELECT id FROM entries WHERE id = ?", (entry_id,))
+        if cur.fetchone() is not None:
+            execute_query(cur, "UPDATE entries SET cat_id = ? WHERE id = ?", (new_cat_id, entry_id))
+
+    conn.commit()
+    conn.close()
+
+    return Cat(id=new_cat_id, name=name, createdAt=created_at)
 
 
 @app.post("/entries/{entry_id}/analyze", response_model=EntryAnalysis)
