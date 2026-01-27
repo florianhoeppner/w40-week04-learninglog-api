@@ -16,7 +16,9 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "CatAtlas API"
+
     app_version: str = "1.0.2"  # Bunny.net default region fix
+
     debug: bool = False
 
     # Database
