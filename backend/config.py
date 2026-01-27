@@ -16,7 +16,9 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "CatAtlas API"
-    app_version: str = "1.0.2"  # Fix PostgreSQL column name casing
+
+    app_version: str = "1.0.2"  # Bunny.net default region fix
+
     debug: bool = False
 
     # Database
@@ -44,7 +46,7 @@ class Settings(BaseSettings):
     # Image Upload (Bunny.net)
     bunny_storage_zone: Optional[str] = None  # e.g., "catatlas"
     bunny_api_key: Optional[str] = None  # Storage API key
-    bunny_storage_region: str = "de"  # Default: Germany (de, ny, la, sg, syd)
+    bunny_storage_region: str = ""  # Region prefix: "" (default/Falkenstein), ny, uk, la, sg, syd
     bunny_cdn_hostname: Optional[str] = None  # e.g., "catatlas.b-cdn.net"
     max_upload_size_mb: int = 10  # Maximum file size in MB
     allowed_image_types: str = "image/jpeg,image/png,image/webp,image/gif"
@@ -77,10 +79,19 @@ class Settings(BaseSettings):
 
     @property
     def bunny_storage_url(self) -> Optional[str]:
-        """Generate Bunny.net storage API URL."""
+        """Generate Bunny.net storage API URL.
+
+        Default region (Falkenstein, Germany) uses storage.bunnycdn.com
+        Other regions use prefixed endpoints like ny.storage.bunnycdn.com
+        """
         if not self.bunny_storage_zone:
             return None
-        return f"https://{self.bunny_storage_region}.storage.bunnycdn.com/{self.bunny_storage_zone}"
+
+        # Default region (empty string) uses storage.bunnycdn.com (no prefix)
+        if self.bunny_storage_region:
+            return f"https://{self.bunny_storage_region}.storage.bunnycdn.com/{self.bunny_storage_zone}"
+        else:
+            return f"https://storage.bunnycdn.com/{self.bunny_storage_zone}"
 
     @property
     def bunny_cdn_url(self) -> Optional[str]:

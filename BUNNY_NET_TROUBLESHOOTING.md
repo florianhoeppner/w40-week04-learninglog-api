@@ -11,10 +11,18 @@ Check these in Railway dashboard → Settings → Environment Variables:
 
 ```
 BUNNY_STORAGE_ZONE=catatlas
-BUNNY_API_KEY=223fa2de-3dba-40b0-b6b7949d7804-30b2-4077
-BUNNY_STORAGE_REGION=de
+BUNNY_API_KEY=your-storage-zone-password-here
+BUNNY_STORAGE_REGION=          # Empty for default (Falkenstein), or ny/uk/la/sg/syd for other regions
 BUNNY_CDN_HOSTNAME=catatlas.b-cdn.net
 ```
+
+**CRITICAL**: `BUNNY_STORAGE_REGION` should be:
+- **Empty string** (or omit entirely) for the default region (Falkenstein, Germany) → `storage.bunnycdn.com`
+- `ny` for New York → `ny.storage.bunnycdn.com`
+- `uk` for London → `uk.storage.bunnycdn.com`
+- `la` for Los Angeles → `la.storage.bunnycdn.com`
+- `sg` for Singapore → `sg.storage.bunnycdn.com`
+- `syd` for Sydney → `syd.storage.bunnycdn.com`
 
 ### Step 2: Check Bunny.net Dashboard
 
@@ -49,21 +57,32 @@ BUNNY_CDN_HOSTNAME=catatlas.b-cdn.net
 4. Update `BUNNY_API_KEY` in Railway with this key
 5. Redeploy
 
-### Issue 2: Wrong Storage Zone Region
+### Issue 2: Wrong Storage Zone Region/Endpoint ⚠️ **VERY COMMON**
 
-**Problem**: Zone is in different region than configured
+**Problem**: Using wrong region code or endpoint format
 
-**Symptoms**: 404 Not Found
+**Symptoms**: Connection timeout, request never completes, retries exhaust
 
 **Fix**:
-1. Check actual region in Bunny.net dashboard
-2. Update `BUNNY_STORAGE_REGION` in Railway:
-   - `de` = Germany (Frankfurt)
-   - `ny` = New York
-   - `la` = Los Angeles
-   - `sg` = Singapore
-   - `syd` = Sydney
-   - `uk` = United Kingdom
+1. Check your storage zone's actual hostname in Bunny.net dashboard
+2. If it shows `storage.bunnycdn.com` (no prefix):
+   - Set `BUNNY_STORAGE_REGION=` (empty string)
+   - Or delete the `BUNNY_STORAGE_REGION` variable entirely
+3. If it shows a prefix like `ny.storage.bunnycdn.com`:
+   - Set `BUNNY_STORAGE_REGION=ny`
+4. Update in Railway and redeploy
+
+**Common mistake**: Setting `BUNNY_STORAGE_REGION=de` for the default region
+- ❌ Wrong: `de.storage.bunnycdn.com` (doesn't exist!)
+- ✅ Correct: `storage.bunnycdn.com` (empty region)
+
+Available regions:
+   - Empty = Default (Falkenstein, Germany) → `storage.bunnycdn.com`
+   - `ny` = New York → `ny.storage.bunnycdn.com`
+   - `la` = Los Angeles → `la.storage.bunnycdn.com`
+   - `sg` = Singapore → `sg.storage.bunnycdn.com`
+   - `syd` = Sydney → `syd.storage.bunnycdn.com`
+   - `uk` = United Kingdom → `uk.storage.bunnycdn.com`
 
 ### Issue 3: Storage Zone Doesn't Exist
 
