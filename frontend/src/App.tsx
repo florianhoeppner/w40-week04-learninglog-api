@@ -22,6 +22,7 @@ import { LocationStatus, LocationBadge } from "./components/LocationStatus";
 import { SimilarNearbyPanel } from "./components/SimilarNearbyPanel";
 import { CreateCatModal } from "./components/CreateCatModal";
 import { LinkToCatModal } from "./components/LinkToCatModal";
+import { SightingsMap } from "./components/SightingsMap";
 
 /**
  * CatAtlas - Production Ready
@@ -70,6 +71,7 @@ function AppContent() {
   // UI state
   // ----------------------------
   const [filter, setFilter] = useState<"all" | "favorites">("all");
+  const [viewMode, setViewMode] = useState<"list" | "map">("list");
   const [error, setError] = useState<string | null>(null);
 
   // "Loading" state for enrichment button
@@ -90,6 +92,13 @@ function AppContent() {
   const visible = useMemo(() => {
     return entries.filter((e) => (filter === "favorites" ? e.isFavorite : true));
   }, [entries, filter]);
+
+  // Entries with coordinates for map view
+  const entriesWithCoords = useMemo(() => {
+    return entries.filter(
+      (e) => e.location_lat !== null && e.location_lat !== undefined
+    );
+  }, [entries]);
 
   // ----------------------------
   // Week 9: Cat Insights state
@@ -403,6 +412,21 @@ function AppContent() {
   }
 
   // ----------------------------
+  // Map handlers
+  // ----------------------------
+
+  function handleMapEntryClick(entryId: number) {
+    const entry = entries.find((e) => e.id === entryId);
+    if (entry) {
+      openSimilarPanel(entry);
+    }
+  }
+
+  function handleMapCreateCat(entryIds: number[]) {
+    setCreateCatEntryIds(entryIds);
+  }
+
+  // ----------------------------
   // Initial load
   // ----------------------------
   useEffect(() => {
@@ -559,28 +583,82 @@ function AppContent() {
         </p>
       </section>
 
-      {/* Filters */}
-      <section className="filters" style={{ marginTop: 16 }}>
+      {/* View Mode Tabs */}
+      <section style={{ marginTop: 16, display: "flex", gap: 8 }}>
         <button
-          className={filter === "all" ? "active" : ""}
           type="button"
-          onClick={() => setFilter("all")}
+          onClick={() => setViewMode("list")}
+          aria-pressed={viewMode === "list"}
+          style={{
+            padding: "10px 20px",
+            backgroundColor: viewMode === "list" ? "#3b82f6" : "#fff",
+            color: viewMode === "list" ? "#fff" : "#374151",
+            border: viewMode === "list" ? "none" : "1px solid #d1d5db",
+            borderRadius: "6px",
+            cursor: "pointer",
+            fontWeight: 500,
+          }}
         >
-          All
+          List View
         </button>
-
         <button
-          className={filter === "favorites" ? "active" : ""}
           type="button"
-          onClick={() => setFilter("favorites")}
+          onClick={() => setViewMode("map")}
+          disabled={entriesWithCoords.length === 0}
+          aria-pressed={viewMode === "map"}
+          title={entriesWithCoords.length === 0 ? "No sightings with verified locations" : undefined}
+          style={{
+            padding: "10px 20px",
+            backgroundColor: viewMode === "map" ? "#3b82f6" : "#fff",
+            color: viewMode === "map" ? "#fff" : "#374151",
+            border: viewMode === "map" ? "none" : "1px solid #d1d5db",
+            borderRadius: "6px",
+            cursor: entriesWithCoords.length === 0 ? "not-allowed" : "pointer",
+            fontWeight: 500,
+            opacity: entriesWithCoords.length === 0 ? 0.5 : 1,
+          }}
         >
-          Favorites
+          Map View {entriesWithCoords.length > 0 && `(${entriesWithCoords.length})`}
         </button>
       </section>
 
+      {/* Filters (only show for list view) */}
+      {viewMode === "list" && (
+        <section className="filters" style={{ marginTop: 16 }}>
+          <button
+            className={filter === "all" ? "active" : ""}
+            type="button"
+            onClick={() => setFilter("all")}
+          >
+            All
+          </button>
+
+          <button
+            className={filter === "favorites" ? "active" : ""}
+            type="button"
+            onClick={() => setFilter("favorites")}
+          >
+            Favorites
+          </button>
+        </section>
+      )}
+
+      {/* Map View */}
+      {viewMode === "map" && (
+        <section style={{ marginTop: 16 }}>
+          <h2>Sightings Map</h2>
+          <SightingsMap
+            entries={entries}
+            onEntryClick={handleMapEntryClick}
+            onCreateCat={handleMapCreateCat}
+          />
+        </section>
+      )}
+
       {/* Sightings list */}
-      <section style={{ marginTop: 16 }}>
-        <h2>Sightings</h2>
+      {viewMode === "list" && (
+        <section style={{ marginTop: 16 }}>
+          <h2>Sightings</h2>
 
         <ul className="entry-list">
           {visible.length === 0 ? (
@@ -775,7 +853,8 @@ function AppContent() {
             })
           )}
         </ul>
-      </section>
+        </section>
+      )}
 
       {/* Similar/Nearby Panel */}
       {similarPanelEntry && (
