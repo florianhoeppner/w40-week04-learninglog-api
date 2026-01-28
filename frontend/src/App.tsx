@@ -6,8 +6,8 @@ import {
   toggleEntryFavorite,
   analyzeEntry,
   getEntryAnalysis,
-  findMatches,
   getCatInsights,
+  normalizeEntryLocation,
   type Entry,
   type EntryCreatePayload,
   type EntryAnalysis,
@@ -17,27 +17,61 @@ import {
 import { useMutation } from "./hooks/useMutation";
 import { ImageUpload } from "./components/ImageUpload";
 import { createEntryWithImage } from "./api/upload";
+import { ToastProvider, useToast } from "./components/Toast";
+import { LocationStatus, LocationBadge } from "./components/LocationStatus";
+import { SimilarNearbyPanel } from "./components/SimilarNearbyPanel";
+import { CreateCatModal } from "./components/CreateCatModal";
+import { LinkToCatModal } from "./components/LinkToCatModal";
+import { SightingsMap } from "./components/SightingsMap";
 
 /**
  * CatAtlas - Production Ready
  * - Resilient API client with retry, timeout, and circuit breaker
  * - Comprehensive error handling
  * - Full test coverage
+ * - Location normalization with auto-geocoding
  */
 
 export default function App() {
+  return (
+    <ToastProvider>
+      <AppContent />
+    </ToastProvider>
+  );
+}
+
+function AppContent() {
+  const { showSuccess, showError, showWarning } = useToast();
+
   // ----------------------------
   // Main data state
   // ----------------------------
   const [entries, setEntries] = useState<Entry[]>([]);
   const [analysisById, setAnalysisById] = useState<Record<number, EntryAnalysis>>({});
-  const [matchesById, setMatchesById] = useState<Record<number, MatchCandidate[]>>({});
-  const [loadingMatchId, setLoadingMatchId] = useState<number | null>(null);
+  // Matches are now displayed in SimilarNearbyPanel, but we keep this for inline display
+  const [matchesById] = useState<Record<number, MatchCandidate[]>>({});
+
+  // ----------------------------
+  // Location normalization state
+  // ----------------------------
+  const [normalizingEntries, setNormalizingEntries] = useState<Set<number>>(new Set());
+
+  // ----------------------------
+  // Similar/Nearby panel state
+  // ----------------------------
+  const [similarPanelEntry, setSimilarPanelEntry] = useState<Entry | null>(null);
+
+  // ----------------------------
+  // Create/Link Cat modal state
+  // ----------------------------
+  const [createCatEntryIds, setCreateCatEntryIds] = useState<number[] | null>(null);
+  const [linkToCatEntryIds, setLinkToCatEntryIds] = useState<number[] | null>(null);
 
   // ----------------------------
   // UI state
   // ----------------------------
   const [filter, setFilter] = useState<"all" | "favorites">("all");
+  const [viewMode, setViewMode] = useState<"list" | "map">("list");
   const [error, setError] = useState<string | null>(null);
 
   // "Loading" state for enrichment button
@@ -58,6 +92,13 @@ export default function App() {
   const visible = useMemo(() => {
     return entries.filter((e) => (filter === "favorites" ? e.isFavorite : true));
   }, [entries, filter]);
+
+  // Entries with coordinates for map view
+  const entriesWithCoords = useMemo(() => {
+    return entries.filter(
+      (e) => e.location_lat !== null && e.location_lat !== undefined
+    );
+  }, [entries]);
 
   // ----------------------------
   // Week 9: Cat Insights state
@@ -162,37 +203,27 @@ export default function App() {
     }
   }
 
-  async function findMatchesForEntry(entryId: number) {
-    setLoadingMatchId(entryId);
-    setError(null);
-
-    try {
-      const data = await findMatches(entryId, 5, 0.15);
-      setMatchesById((prev) => ({ ...prev, [entryId]: data }));
-    } catch (e: any) {
-      console.error(e);
-      setError(e.getUserMessage?.() || "Could not load matches.");
-    } finally {
-      setLoadingMatchId(null);
-    }
-  }
+  // Legacy matches are now handled by SimilarNearbyPanel
+  // Keeping matchesById state for backward compatibility with inline match display
 
   async function addSighting() {
     const text = notes.trim();
     if (!text) return;
 
     setError(null);
+    let createdEntry: Entry | null = null;
 
     // If there's an image file, use the multipart endpoint
     if (photoFile) {
       try {
-        const created = await createEntryWithImage(
+        createdEntry = await createEntryWithImage(
           text,
           nickname.trim() || null,
           location.trim() || null,
           photoFile
         );
-        setEntries((prev) => [created, ...prev]);
+        setEntries((prev) => [createdEntry!, ...prev]);
+        showSuccess("Sighting added successfully!");
         // Reset form
         setNickname("");
         setLocation("");
@@ -201,6 +232,8 @@ export default function App() {
         setPhotoFile(null);
       } catch (e: any) {
         setError(e.getUserMessage?.() || "Failed to create sighting");
+        showError("Failed to add sighting", e.getUserMessage?.() || "Please try again.");
+        return;
       }
     } else {
       // Use existing JSON endpoint for entries without image upload
@@ -210,7 +243,19 @@ export default function App() {
         location: location.trim() || null,
         photo_url: photoUrl.trim() || null,
       };
-      await createEntryMutation.mutateAsync(payload);
+      try {
+        createdEntry = await createEntryMutation.mutateAsync(payload);
+        showSuccess("Sighting added successfully!");
+      } catch (e: any) {
+        // Error already handled by mutation onError
+        return;
+      }
+    }
+
+    // Auto-normalize location in background (non-blocking)
+    if (createdEntry && createdEntry.location) {
+      // Don't await - run in background
+      normalizeLocation(createdEntry.id, true);
     }
   }
 
@@ -242,6 +287,143 @@ export default function App() {
       if (e.details?.statusCode === 404) return;
       // Silently ignore other errors for now
     }
+  }
+
+  // ----------------------------
+  // Location normalization
+  // ----------------------------
+
+  async function normalizeLocation(entryId: number, showFeedback: boolean = true) {
+    // Mark as normalizing
+    setNormalizingEntries((prev) => new Set(prev).add(entryId));
+
+    try {
+      const result = await normalizeEntryLocation(entryId);
+
+      if (result.status === "success") {
+        // Update the entry with normalized location
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === entryId
+              ? {
+                  ...e,
+                  location_normalized: result.normalized_location,
+                  location_lat: result.latitude,
+                  location_lon: result.longitude,
+                  location_osm_id: result.osm_id,
+                }
+              : e
+          )
+        );
+
+        if (showFeedback) {
+          const shortLocation = result.normalized_location?.split(",")[0] || "Location";
+          showSuccess(`Location verified: ${shortLocation}`);
+        }
+      } else if (result.status === "not_found") {
+        if (showFeedback) {
+          showWarning("Location not found on map. You can edit it later.");
+        }
+      } else if (result.status === "already_normalized") {
+        // Already done, no action needed
+      }
+      // "no_location" status means entry has no location to normalize
+    } catch (e: any) {
+      console.error("Location normalization failed:", e);
+      if (showFeedback) {
+        showWarning("Location verification delayed. Will retry automatically.");
+      }
+    } finally {
+      setNormalizingEntries((prev) => {
+        const next = new Set(prev);
+        next.delete(entryId);
+        return next;
+      });
+    }
+  }
+
+  async function retryNormalizeLocation(entryId: number) {
+    setNormalizingEntries((prev) => new Set(prev).add(entryId));
+
+    try {
+      const result = await normalizeEntryLocation(entryId, true);
+
+      if (result.status === "success") {
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === entryId
+              ? {
+                  ...e,
+                  location_normalized: result.normalized_location,
+                  location_lat: result.latitude,
+                  location_lon: result.longitude,
+                  location_osm_id: result.osm_id,
+                }
+              : e
+          )
+        );
+        showSuccess("Location verified!");
+      } else {
+        showWarning("Location could not be verified. Try a different address.");
+      }
+    } catch (e: any) {
+      showError("Verification failed", "Please try again later.");
+    } finally {
+      setNormalizingEntries((prev) => {
+        const next = new Set(prev);
+        next.delete(entryId);
+        return next;
+      });
+    }
+  }
+
+  // ----------------------------
+  // Similar/Nearby panel handlers
+  // ----------------------------
+
+  function openSimilarPanel(entry: Entry) {
+    setSimilarPanelEntry(entry);
+  }
+
+  function closeSimilarPanel() {
+    setSimilarPanelEntry(null);
+  }
+
+  function handleCreateCatFromSightings(entryIds: number[]) {
+    closeSimilarPanel();
+    setCreateCatEntryIds(entryIds);
+  }
+
+  function handleLinkToExistingCat(entryIds: number[]) {
+    closeSimilarPanel();
+    setLinkToCatEntryIds(entryIds);
+  }
+
+  function handleCatCreated() {
+    setCreateCatEntryIds(null);
+    // Refresh entries to get updated cat_id assignments
+    loadEntries();
+  }
+
+  function handleSightingsLinked() {
+    setLinkToCatEntryIds(null);
+    // Refresh entries to get updated cat_id assignments
+    loadEntries();
+  }
+
+  // ----------------------------
+  // Map handlers
+  // ----------------------------
+
+  function handleMapEntryClick(entryId: number) {
+    const entry = entries.find((e) => e.id === entryId);
+    if (entry) {
+      openSimilarPanel(entry);
+    }
+  }
+
+  function handleMapCreateCat(entryIds: number[]) {
+    setCreateCatEntryIds(entryIds);
   }
 
   // ----------------------------
@@ -401,28 +583,82 @@ export default function App() {
         </p>
       </section>
 
-      {/* Filters */}
-      <section className="filters" style={{ marginTop: 16 }}>
+      {/* View Mode Tabs */}
+      <section style={{ marginTop: 16, display: "flex", gap: 8 }}>
         <button
-          className={filter === "all" ? "active" : ""}
           type="button"
-          onClick={() => setFilter("all")}
+          onClick={() => setViewMode("list")}
+          aria-pressed={viewMode === "list"}
+          style={{
+            padding: "10px 20px",
+            backgroundColor: viewMode === "list" ? "#3b82f6" : "#fff",
+            color: viewMode === "list" ? "#fff" : "#374151",
+            border: viewMode === "list" ? "none" : "1px solid #d1d5db",
+            borderRadius: "6px",
+            cursor: "pointer",
+            fontWeight: 500,
+          }}
         >
-          All
+          List View
         </button>
-
         <button
-          className={filter === "favorites" ? "active" : ""}
           type="button"
-          onClick={() => setFilter("favorites")}
+          onClick={() => setViewMode("map")}
+          disabled={entriesWithCoords.length === 0}
+          aria-pressed={viewMode === "map"}
+          title={entriesWithCoords.length === 0 ? "No sightings with verified locations" : undefined}
+          style={{
+            padding: "10px 20px",
+            backgroundColor: viewMode === "map" ? "#3b82f6" : "#fff",
+            color: viewMode === "map" ? "#fff" : "#374151",
+            border: viewMode === "map" ? "none" : "1px solid #d1d5db",
+            borderRadius: "6px",
+            cursor: entriesWithCoords.length === 0 ? "not-allowed" : "pointer",
+            fontWeight: 500,
+            opacity: entriesWithCoords.length === 0 ? 0.5 : 1,
+          }}
         >
-          Favorites
+          Map View {entriesWithCoords.length > 0 && `(${entriesWithCoords.length})`}
         </button>
       </section>
 
+      {/* Filters (only show for list view) */}
+      {viewMode === "list" && (
+        <section className="filters" style={{ marginTop: 16 }}>
+          <button
+            className={filter === "all" ? "active" : ""}
+            type="button"
+            onClick={() => setFilter("all")}
+          >
+            All
+          </button>
+
+          <button
+            className={filter === "favorites" ? "active" : ""}
+            type="button"
+            onClick={() => setFilter("favorites")}
+          >
+            Favorites
+          </button>
+        </section>
+      )}
+
+      {/* Map View */}
+      {viewMode === "map" && (
+        <section style={{ marginTop: 16 }}>
+          <h2>Sightings Map</h2>
+          <SightingsMap
+            entries={entries}
+            onEntryClick={handleMapEntryClick}
+            onCreateCat={handleMapCreateCat}
+          />
+        </section>
+      )}
+
       {/* Sightings list */}
-      <section style={{ marginTop: 16 }}>
-        <h2>Sightings</h2>
+      {viewMode === "list" && (
+        <section style={{ marginTop: 16 }}>
+          <h2>Sightings</h2>
 
         <ul className="entry-list">
           {visible.length === 0 ? (
@@ -434,13 +670,23 @@ export default function App() {
 
               return (
                 <li key={e.id} className="entry-item">
-                  <div style={{ fontWeight: 800 }}>
-                    {e.nickname ? e.nickname : `Cat #${e.id}`}
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontWeight: 800 }}>
+                      {e.nickname ? e.nickname : `Cat #${e.id}`}
+                    </span>
+                    {e.location && (
+                      <LocationBadge entry={e} />
+                    )}
                   </div>
 
                   {e.location && (
-                    <div style={{ color: "#555", marginTop: 4 }}>
-                      📍 {e.location}
+                    <div style={{ color: "#555", marginTop: 4, display: "flex", alignItems: "center", gap: 8 }}>
+                      <span>📍 {e.location}</span>
+                      <LocationStatus
+                        entry={e}
+                        isNormalizing={normalizingEntries.has(e.id)}
+                        onRetryNormalize={retryNormalizeLocation}
+                      />
                     </div>
                   )}
                   {e.photo_url && (
@@ -473,11 +719,10 @@ export default function App() {
 
                     <button
                       type="button"
-                      onClick={() => findMatchesForEntry(e.id)}
-                      disabled={loadingMatchId === e.id}
-                      title="Suggest similar cats based on notes + location (text-only)"
+                      onClick={() => openSimilarPanel(e)}
+                      title="Find similar and nearby sightings"
                     >
-                      {loadingMatchId === e.id ? "Matching…" : "Find matches"}
+                      Find Similar
                     </button>
 
                     {catId != null && (
@@ -608,7 +853,39 @@ export default function App() {
             })
           )}
         </ul>
-      </section>
+        </section>
+      )}
+
+      {/* Similar/Nearby Panel */}
+      {similarPanelEntry && (
+        <SimilarNearbyPanel
+          entry={similarPanelEntry}
+          isOpen={true}
+          onClose={closeSimilarPanel}
+          onCreateCat={handleCreateCatFromSightings}
+          onLinkToCat={handleLinkToExistingCat}
+        />
+      )}
+
+      {/* Create Cat Modal */}
+      {createCatEntryIds && (
+        <CreateCatModal
+          selectedEntryIds={createCatEntryIds}
+          entries={entries}
+          onClose={() => setCreateCatEntryIds(null)}
+          onSuccess={handleCatCreated}
+        />
+      )}
+
+      {/* Link to Cat Modal */}
+      {linkToCatEntryIds && (
+        <LinkToCatModal
+          selectedEntryIds={linkToCatEntryIds}
+          entries={entries}
+          onClose={() => setLinkToCatEntryIds(null)}
+          onSuccess={handleSightingsLinked}
+        />
+      )}
     </main>
   );
 }
