@@ -140,6 +140,68 @@ export type Cat = {
   createdAt: string;
 };
 
+// ===========================
+// Enhanced Cat Profile Types (Cat Profile Page)
+// ===========================
+
+/** Basic cat information for profile header */
+export type CatBasicInfo = {
+  id: number;
+  name?: string | null;
+  createdAt: string;
+  primaryPhoto?: string | null;
+};
+
+/** Aggregated statistics for a cat */
+export type CatStats = {
+  totalSightings: number;
+  uniqueLocations: number;
+  photoCount: number;
+  firstSeen?: string | null;
+  lastSeen?: string | null;
+  mostFrequentLocation?: string | null;
+};
+
+/** Summary of sightings at a specific location */
+export type LocationSummary = {
+  location: string;
+  normalizedLocation?: string | null;
+  count: number;
+  lastSeen: string;
+  lat?: number | null;
+  lon?: number | null;
+};
+
+/** Status of AI-generated insights for a cat */
+export type InsightStatus = {
+  hasProfile: boolean;
+  hasCare: boolean;
+  hasUpdate: boolean;
+  hasRisk: boolean;
+  lastUpdated?: string | null;
+};
+
+/** Simplified sighting for profile preview */
+export type RecentSighting = {
+  id: number;
+  text: string;
+  createdAt: string;
+  location?: string | null;
+  photo_url?: string | null;
+};
+
+/** Enhanced cat profile with stats for dedicated profile page */
+export type EnhancedCatProfile = {
+  cat: CatBasicInfo;
+  stats: CatStats;
+  recentSightings: RecentSighting[];
+  locationSummary: LocationSummary[];
+  insightStatus: InsightStatus;
+  top_tags: string[];
+  temperament_guess: string;
+  profile_text: string;
+};
+
 /** Response from bulk linking sightings to a cat */
 export type LinkSightingsResponse = {
   cat_id: number;
@@ -375,6 +437,14 @@ export function createCatFromSightings(
     entry_ids: entryIds,
     name,
   });
+}
+
+/**
+ * Get enhanced cat profile with aggregated stats for the Cat Profile page
+ * @param catId The cat ID to fetch profile for
+ */
+export function getEnhancedCatProfile(catId: number): Promise<EnhancedCatProfile> {
+  return get<EnhancedCatProfile>(`/cats/${catId}/profile/enhanced`);
 }
 
 // ===========================
