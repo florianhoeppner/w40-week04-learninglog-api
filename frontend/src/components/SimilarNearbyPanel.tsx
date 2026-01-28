@@ -1,6 +1,7 @@
 /**
  * SimilarNearbyPanel Component
  * Allows users to discover similar and nearby sightings
+ * Supports light and dark mode
  */
 
 import { useState, useCallback, useEffect } from "react";
@@ -11,6 +12,7 @@ import {
   type MatchCandidate,
   type NearbySighting,
 } from "../api/endpoints";
+import { useThemeColors } from "../hooks/useDarkMode";
 
 // ===========================
 // Types
@@ -37,6 +39,7 @@ interface MatchCardProps {
 }
 
 function MatchCard({ match, selected, onToggle }: MatchCardProps) {
+  const colors = useThemeColors();
   const isNearby = "distance_meters" in match;
   const score = isNearby ? match.match_score : match.score;
   const scoreLabel = score > 0.7 ? "High" : score > 0.4 ? "Medium" : "Low";
@@ -53,11 +56,11 @@ function MatchCard({ match, selected, onToggle }: MatchCardProps) {
       onClick={onToggle}
       style={{
         padding: "12px",
-        border: selected ? "2px solid #3b82f6" : "1px solid #e5e7eb",
+        border: selected ? `2px solid ${colors.primary}` : `1px solid ${colors.border}`,
         borderRadius: "8px",
         marginBottom: "8px",
         cursor: "pointer",
-        backgroundColor: selected ? "#eff6ff" : "#fff",
+        backgroundColor: selected ? colors.infoBg : colors.cardBg,
         transition: "all 0.15s ease",
       }}
     >
@@ -76,6 +79,7 @@ function MatchCard({ match, selected, onToggle }: MatchCardProps) {
             style={{
               margin: 0,
               fontSize: "14px",
+              color: colors.textPrimary,
               overflow: "hidden",
               textOverflow: "ellipsis",
               display: "-webkit-box",
@@ -87,7 +91,7 @@ function MatchCard({ match, selected, onToggle }: MatchCardProps) {
           </p>
 
           {isNearby && (
-            <p style={{ margin: "4px 0 0", fontSize: "12px", color: "#6b7280" }}>
+            <p style={{ margin: "4px 0 0", fontSize: "12px", color: colors.textMuted }}>
               {match.distance_meters < 1000
                 ? `${Math.round(match.distance_meters)}m away`
                 : `${(match.distance_meters / 1000).toFixed(1)}km away`}
@@ -95,7 +99,7 @@ function MatchCard({ match, selected, onToggle }: MatchCardProps) {
           )}
 
           {location && (
-            <p style={{ margin: "4px 0 0", fontSize: "12px", color: "#6b7280" }}>
+            <p style={{ margin: "4px 0 0", fontSize: "12px", color: colors.textMuted }}>
               📍 {location}
             </p>
           )}
@@ -108,8 +112,8 @@ function MatchCard({ match, selected, onToggle }: MatchCardProps) {
                 padding: "2px 8px",
                 borderRadius: "12px",
                 fontSize: "11px",
-                backgroundColor: "#dcfce7",
-                color: "#166534",
+                backgroundColor: colors.successBg,
+                color: colors.success,
               }}
             >
               Linked to: {catName}
@@ -137,7 +141,7 @@ function MatchCard({ match, selected, onToggle }: MatchCardProps) {
           style={{
             margin: "8px 0 0 28px",
             fontSize: "11px",
-            color: "#9ca3af",
+            color: colors.textMuted,
           }}
         >
           {reasons.join(", ")}
@@ -156,6 +160,7 @@ interface RadiusSliderProps {
 }
 
 function RadiusSlider({ value, onChange, min, max, step }: RadiusSliderProps) {
+  const colors = useThemeColors();
   return (
     <div style={{ marginBottom: "16px" }}>
       <label
@@ -164,10 +169,11 @@ function RadiusSlider({ value, onChange, min, max, step }: RadiusSliderProps) {
           justifyContent: "space-between",
           fontSize: "13px",
           marginBottom: "4px",
+          color: colors.textSecondary,
         }}
       >
         <span>Search radius</span>
-        <span style={{ fontWeight: 600 }}>
+        <span style={{ fontWeight: 600, color: colors.textPrimary }}>
           {value < 1000 ? `${value}m` : `${(value / 1000).toFixed(1)}km`}
         </span>
       </label>
@@ -191,15 +197,16 @@ interface EmptyStateProps {
 }
 
 function EmptyState({ title, description, action }: EmptyStateProps) {
+  const colors = useThemeColors();
   return (
     <div
       style={{
         padding: "32px 16px",
         textAlign: "center",
-        color: "#6b7280",
+        color: colors.textMuted,
       }}
     >
-      <p style={{ margin: 0, fontWeight: 500 }}>{title}</p>
+      <p style={{ margin: 0, fontWeight: 500, color: colors.textSecondary }}>{title}</p>
       <p style={{ margin: "8px 0 0", fontSize: "13px" }}>{description}</p>
       {action && (
         <button
@@ -209,6 +216,10 @@ function EmptyState({ title, description, action }: EmptyStateProps) {
             padding: "6px 12px",
             fontSize: "13px",
             cursor: "pointer",
+            backgroundColor: colors.buttonBg,
+            color: colors.buttonText,
+            border: `1px solid ${colors.border}`,
+            borderRadius: "4px",
           }}
         >
           {action.label}
@@ -224,16 +235,17 @@ interface ErrorStateProps {
 }
 
 function ErrorState({ message, onRetry }: ErrorStateProps) {
+  const colors = useThemeColors();
   return (
     <div
       style={{
         padding: "16px",
-        backgroundColor: "#fef2f2",
+        backgroundColor: colors.errorBg,
         borderRadius: "8px",
         textAlign: "center",
       }}
     >
-      <p style={{ margin: 0, color: "#dc2626" }}>{message}</p>
+      <p style={{ margin: 0, color: colors.error }}>{message}</p>
       <button
         onClick={onRetry}
         style={{
@@ -241,6 +253,10 @@ function ErrorState({ message, onRetry }: ErrorStateProps) {
           padding: "6px 12px",
           fontSize: "13px",
           cursor: "pointer",
+          backgroundColor: colors.buttonBg,
+          color: colors.buttonText,
+          border: `1px solid ${colors.border}`,
+          borderRadius: "4px",
         }}
       >
         Try Again
@@ -250,6 +266,7 @@ function ErrorState({ message, onRetry }: ErrorStateProps) {
 }
 
 function LoadingSkeleton() {
+  const colors = useThemeColors();
   return (
     <div>
       {[1, 2, 3].map((i) => (
@@ -257,15 +274,16 @@ function LoadingSkeleton() {
           key={i}
           style={{
             padding: "12px",
-            border: "1px solid #e5e7eb",
+            border: `1px solid ${colors.border}`,
             borderRadius: "8px",
             marginBottom: "8px",
+            backgroundColor: colors.cardBg,
           }}
         >
           <div
             style={{
               height: "14px",
-              backgroundColor: "#f3f4f6",
+              backgroundColor: colors.borderLight,
               borderRadius: "4px",
               width: "80%",
               animation: "pulse 1.5s infinite",
@@ -274,7 +292,7 @@ function LoadingSkeleton() {
           <div
             style={{
               height: "12px",
-              backgroundColor: "#f3f4f6",
+              backgroundColor: colors.borderLight,
               borderRadius: "4px",
               width: "50%",
               marginTop: "8px",
@@ -306,6 +324,7 @@ export function SimilarNearbyPanel({
   onCreateCat,
   onLinkToCat,
 }: SimilarNearbyPanelProps) {
+  const colors = useThemeColors();
   const [activeTab, setActiveTab] = useState<TabType>("similar");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set([entry.id]));
   const [radius, setRadius] = useState(500);
@@ -426,7 +445,7 @@ export function SimilarNearbyPanel({
         style={{
           position: "fixed",
           inset: 0,
-          backgroundColor: "rgba(0, 0, 0, 0.3)",
+          backgroundColor: colors.overlayBg,
           zIndex: 999,
         }}
       />
@@ -442,8 +461,8 @@ export function SimilarNearbyPanel({
           bottom: 0,
           width: "400px",
           maxWidth: "100vw",
-          backgroundColor: "#fff",
-          boxShadow: "-4px 0 20px rgba(0, 0, 0, 0.1)",
+          backgroundColor: colors.panelBg,
+          boxShadow: "-4px 0 20px rgba(0, 0, 0, 0.2)",
           zIndex: 1000,
           display: "flex",
           flexDirection: "column",
@@ -454,13 +473,14 @@ export function SimilarNearbyPanel({
         <div
           style={{
             padding: "16px",
-            borderBottom: "1px solid #e5e7eb",
+            borderBottom: `1px solid ${colors.border}`,
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
+            backgroundColor: colors.panelHeaderBg,
           }}
         >
-          <h2 style={{ margin: 0, fontSize: "18px" }}>Find Similar Sightings</h2>
+          <h2 style={{ margin: 0, fontSize: "18px", color: colors.textPrimary }}>Find Similar Sightings</h2>
           <button
             onClick={onClose}
             style={{
@@ -470,10 +490,11 @@ export function SimilarNearbyPanel({
               cursor: "pointer",
               padding: "4px",
               lineHeight: 1,
+              color: colors.textSecondary,
             }}
             aria-label="Close panel"
           >
-            \u00D7
+            ×
           </button>
         </div>
 
@@ -481,11 +502,11 @@ export function SimilarNearbyPanel({
         <div
           style={{
             padding: "12px 16px",
-            backgroundColor: "#f9fafb",
-            borderBottom: "1px solid #e5e7eb",
+            backgroundColor: colors.panelHeaderBg,
+            borderBottom: `1px solid ${colors.border}`,
           }}
         >
-          <p style={{ margin: 0, fontSize: "13px", color: "#6b7280" }}>
+          <p style={{ margin: 0, fontSize: "13px", color: colors.textMuted }}>
             Comparing with:
           </p>
           <p
@@ -495,6 +516,7 @@ export function SimilarNearbyPanel({
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
+              color: colors.textPrimary,
             }}
           >
             {entry.nickname || `Sighting #${entry.id}`}
@@ -505,7 +527,7 @@ export function SimilarNearbyPanel({
         <div
           style={{
             display: "flex",
-            borderBottom: "1px solid #e5e7eb",
+            borderBottom: `1px solid ${colors.border}`,
           }}
         >
           <button
@@ -516,11 +538,11 @@ export function SimilarNearbyPanel({
               flex: 1,
               padding: "12px",
               border: "none",
-              backgroundColor: activeTab === "similar" ? "#fff" : "#f9fafb",
-              borderBottom: activeTab === "similar" ? "2px solid #3b82f6" : "2px solid transparent",
+              backgroundColor: activeTab === "similar" ? colors.panelBg : colors.panelHeaderBg,
+              borderBottom: activeTab === "similar" ? `2px solid ${colors.primary}` : "2px solid transparent",
               cursor: "pointer",
               fontWeight: activeTab === "similar" ? 600 : 400,
-              color: activeTab === "similar" ? "#3b82f6" : "#6b7280",
+              color: activeTab === "similar" ? colors.primary : colors.textMuted,
             }}
           >
             Similar Text {matches.length > 0 && `(${matches.length})`}
@@ -535,11 +557,11 @@ export function SimilarNearbyPanel({
               flex: 1,
               padding: "12px",
               border: "none",
-              backgroundColor: activeTab === "nearby" ? "#fff" : "#f9fafb",
-              borderBottom: activeTab === "nearby" ? "2px solid #3b82f6" : "2px solid transparent",
+              backgroundColor: activeTab === "nearby" ? colors.panelBg : colors.panelHeaderBg,
+              borderBottom: activeTab === "nearby" ? `2px solid ${colors.primary}` : "2px solid transparent",
               cursor: hasCoordinates ? "pointer" : "not-allowed",
               fontWeight: activeTab === "nearby" ? 600 : 400,
-              color: activeTab === "nearby" ? "#3b82f6" : "#6b7280",
+              color: activeTab === "nearby" ? colors.primary : colors.textMuted,
               opacity: hasCoordinates ? 1 : 0.5,
             }}
           >
@@ -591,7 +613,7 @@ export function SimilarNearbyPanel({
                   fontSize: "13px",
                 }}
               >
-                <span style={{ color: "#6b7280" }}>
+                <span style={{ color: colors.textMuted }}>
                   {selectedIds.size - 1} of {currentList.length} selected
                 </span>
                 <div style={{ display: "flex", gap: "8px" }}>
@@ -600,7 +622,7 @@ export function SimilarNearbyPanel({
                     style={{
                       background: "none",
                       border: "none",
-                      color: "#3b82f6",
+                      color: colors.primary,
                       cursor: "pointer",
                       fontSize: "13px",
                     }}
@@ -612,7 +634,7 @@ export function SimilarNearbyPanel({
                     style={{
                       background: "none",
                       border: "none",
-                      color: "#6b7280",
+                      color: colors.textMuted,
                       cursor: "pointer",
                       fontSize: "13px",
                     }}
@@ -649,11 +671,11 @@ export function SimilarNearbyPanel({
           <div
             style={{
               padding: "16px",
-              borderTop: "1px solid #e5e7eb",
-              backgroundColor: "#f9fafb",
+              borderTop: `1px solid ${colors.border}`,
+              backgroundColor: colors.panelHeaderBg,
             }}
           >
-            <p style={{ margin: "0 0 12px", fontWeight: 500 }}>
+            <p style={{ margin: "0 0 12px", fontWeight: 500, color: colors.textPrimary }}>
               {selectedIds.size} sightings selected
             </p>
             <div style={{ display: "flex", gap: "8px" }}>
@@ -662,7 +684,7 @@ export function SimilarNearbyPanel({
                 style={{
                   flex: 1,
                   padding: "10px",
-                  backgroundColor: "#3b82f6",
+                  backgroundColor: colors.primary,
                   color: "#fff",
                   border: "none",
                   borderRadius: "6px",
@@ -677,9 +699,9 @@ export function SimilarNearbyPanel({
                 style={{
                   flex: 1,
                   padding: "10px",
-                  backgroundColor: "#fff",
-                  color: "#374151",
-                  border: "1px solid #d1d5db",
+                  backgroundColor: colors.buttonBg,
+                  color: colors.buttonText,
+                  border: `1px solid ${colors.border}`,
                   borderRadius: "6px",
                   cursor: "pointer",
                   fontWeight: 500,

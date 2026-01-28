@@ -167,7 +167,7 @@ function ToastItem({ toast, onDismiss }: ToastItemProps) {
         }}
         aria-label="Dismiss"
       >
-        \u00D7
+        ×
       </button>
     </div>
   );
