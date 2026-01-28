@@ -81,7 +81,12 @@ function AppContent() {
   // Form state (Cat sighting form)
   // ----------------------------
   const [nickname, setNickname] = useState("");
-  const [location, setLocation] = useState("");
+  // Structured address fields
+  const [locationStreet, setLocationStreet] = useState("");
+  const [locationNumber, setLocationNumber] = useState("");
+  const [locationZip, setLocationZip] = useState("");
+  const [locationCity, setLocationCity] = useState("");
+  const [locationCountry, setLocationCountry] = useState("");
   const [photoUrl, setPhotoUrl] = useState("");
   const [notes, setNotes] = useState("");
   const [photoFile, setPhotoFile] = useState<File | null>(null);
@@ -148,7 +153,11 @@ function AppContent() {
       setEntries((prev) => [created, ...prev]);
       // Reset form
       setNickname("");
-      setLocation("");
+      setLocationStreet("");
+      setLocationNumber("");
+      setLocationZip("");
+      setLocationCity("");
+      setLocationCountry("");
       setNotes("");
       setPhotoUrl("");
       setError(null);
@@ -213,23 +222,41 @@ function AppContent() {
     setError(null);
     let createdEntry: Entry | null = null;
 
+    // Build address object from form fields
+    const addressFields = {
+      street: locationStreet.trim() || null,
+      number: locationNumber.trim() || null,
+      zip: locationZip.trim() || null,
+      city: locationCity.trim() || null,
+      country: locationCountry.trim() || null,
+    };
+    const hasAddress = Object.values(addressFields).some((v) => v);
+
+    // Reset form helper
+    const resetForm = () => {
+      setNickname("");
+      setLocationStreet("");
+      setLocationNumber("");
+      setLocationZip("");
+      setLocationCity("");
+      setLocationCountry("");
+      setNotes("");
+      setPhotoUrl("");
+      setPhotoFile(null);
+    };
+
     // If there's an image file, use the multipart endpoint
     if (photoFile) {
       try {
         createdEntry = await createEntryWithImage(
           text,
           nickname.trim() || null,
-          location.trim() || null,
+          hasAddress ? addressFields : null,
           photoFile
         );
         setEntries((prev) => [createdEntry!, ...prev]);
         showSuccess("Sighting added successfully!");
-        // Reset form
-        setNickname("");
-        setLocation("");
-        setNotes("");
-        setPhotoUrl("");
-        setPhotoFile(null);
+        resetForm();
       } catch (e: any) {
         setError(e.getUserMessage?.() || "Failed to create sighting");
         showError("Failed to add sighting", e.getUserMessage?.() || "Please try again.");
@@ -240,8 +267,13 @@ function AppContent() {
       const payload: EntryCreatePayload = {
         text,
         nickname: nickname.trim() || null,
-        location: location.trim() || null,
         photo_url: photoUrl.trim() || null,
+        // Structured address fields
+        location_street: addressFields.street,
+        location_number: addressFields.number,
+        location_zip: addressFields.zip,
+        location_city: addressFields.city,
+        location_country: addressFields.country,
       };
       try {
         createdEntry = await createEntryMutation.mutateAsync(payload);
@@ -521,16 +553,39 @@ function AppContent() {
         <label style={{ display: "block", fontWeight: 600, marginTop: 12 }}>
           Location (optional)
         </label>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 100px", gap: 8, marginTop: 6 }}>
+          <input
+            value={locationStreet}
+            onChange={(e) => setLocationStreet(e.target.value)}
+            placeholder="Street"
+            style={{ padding: 8, boxSizing: "border-box" }}
+          />
+          <input
+            value={locationNumber}
+            onChange={(e) => setLocationNumber(e.target.value)}
+            placeholder="Number"
+            style={{ padding: 8, boxSizing: "border-box" }}
+          />
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: 8, marginTop: 8 }}>
+          <input
+            value={locationZip}
+            onChange={(e) => setLocationZip(e.target.value)}
+            placeholder="ZIP"
+            style={{ padding: 8, boxSizing: "border-box" }}
+          />
+          <input
+            value={locationCity}
+            onChange={(e) => setLocationCity(e.target.value)}
+            placeholder="City"
+            style={{ padding: 8, boxSizing: "border-box" }}
+          />
+        </div>
         <input
-          value={location}
-          onChange={(e) => setLocation(e.target.value)}
-          placeholder="e.g., 5th Ave & Pine, Central Park north entrance"
-          style={{
-            width: "100%",
-            padding: 8,
-            boxSizing: "border-box",
-            marginTop: 6,
-          }}
+          value={locationCountry}
+          onChange={(e) => setLocationCountry(e.target.value)}
+          placeholder="Country"
+          style={{ width: "100%", padding: 8, boxSizing: "border-box", marginTop: 8 }}
         />
 
         <ImageUpload
@@ -564,7 +619,11 @@ function AppContent() {
             type="button"
             onClick={() => {
               setNickname("");
-              setLocation("");
+              setLocationStreet("");
+              setLocationNumber("");
+              setLocationZip("");
+              setLocationCity("");
+              setLocationCountry("");
               setPhotoUrl("");
               setNotes("");
               setPhotoFile(null);

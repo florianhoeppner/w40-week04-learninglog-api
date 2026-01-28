@@ -24,14 +24,26 @@ export type Entry = {
   location_lat?: number | null;
   location_lon?: number | null;
   location_osm_id?: string | null;
+  // Structured address fields
+  location_street?: string | null;
+  location_number?: string | null;
+  location_zip?: string | null;
+  location_city?: string | null;
+  location_country?: string | null;
 };
 
 /** Payload for creating a new cat sighting */
 export type EntryCreatePayload = {
   text: string;
   nickname?: string | null;
-  location?: string | null;
+  location?: string | null;  // Legacy single field
   photo_url?: string | null;
+  // Structured address fields
+  location_street?: string | null;
+  location_number?: string | null;
+  location_zip?: string | null;
+  location_city?: string | null;
+  location_country?: string | null;
 };
 
 /** Analysis result from AI enrichment */

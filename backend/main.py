@@ -284,6 +284,11 @@ def init_db() -> None:
             location_lat REAL,
             location_lon REAL,
             location_osm_id TEXT,
+            location_street TEXT,
+            location_number TEXT,
+            location_zip TEXT,
+            location_city TEXT,
+            location_country TEXT,
             FOREIGN KEY(cat_id) REFERENCES cats(id) ON DELETE SET NULL
         )
         """
@@ -302,6 +307,13 @@ def init_db() -> None:
     _try_alter_table(conn, cur, "ALTER TABLE entries ADD COLUMN location_lat REAL")
     _try_alter_table(conn, cur, "ALTER TABLE entries ADD COLUMN location_lon REAL")
     _try_alter_table(conn, cur, "ALTER TABLE entries ADD COLUMN location_osm_id TEXT")
+
+    # Structured address fields
+    _try_alter_table(conn, cur, "ALTER TABLE entries ADD COLUMN location_street TEXT")
+    _try_alter_table(conn, cur, "ALTER TABLE entries ADD COLUMN location_number TEXT")
+    _try_alter_table(conn, cur, "ALTER TABLE entries ADD COLUMN location_zip TEXT")
+    _try_alter_table(conn, cur, "ALTER TABLE entries ADD COLUMN location_city TEXT")
+    _try_alter_table(conn, cur, "ALTER TABLE entries ADD COLUMN location_country TEXT")
 
     # --- Analyses table - depends on entries ---
     execute_query(cur,
@@ -357,12 +369,18 @@ def on_startup() -> None:
 class EntryCreate(BaseModel):
     """
     Client payload to create a new sighting/entry.
-    Notes (text) is required. nickname/location are optional.
+    Notes (text) is required. Address fields and nickname are optional.
     """
     text: str = Field(..., min_length=1, max_length=5000)
     nickname: Optional[str] = Field(None, max_length=100)
-    location: Optional[str] = Field(None, max_length=200)
+    location: Optional[str] = Field(None, max_length=200)  # Legacy single field
     photo_url: Optional[str] = Field(None, max_length=1000)
+    # Structured address fields
+    location_street: Optional[str] = Field(None, max_length=200)
+    location_number: Optional[str] = Field(None, max_length=20)
+    location_zip: Optional[str] = Field(None, max_length=20)
+    location_city: Optional[str] = Field(None, max_length=100)
+    location_country: Optional[str] = Field(None, max_length=100)
 
 class CatProfile(BaseModel):
     cat_id: int
@@ -383,7 +401,7 @@ class Entry(BaseModel):
     createdAt: str
     isFavorite: bool
     nickname: Optional[str] = None
-    location: Optional[str] = None
+    location: Optional[str] = None  # Legacy single field (auto-built from structured fields)
     cat_id: Optional[int] = None
     photo_url: Optional[str] = None
     # Location normalization fields (OpenStreetMap)
@@ -391,6 +409,12 @@ class Entry(BaseModel):
     location_lat: Optional[float] = None
     location_lon: Optional[float] = None
     location_osm_id: Optional[str] = None
+    # Structured address fields
+    location_street: Optional[str] = None
+    location_number: Optional[str] = None
+    location_zip: Optional[str] = None
+    location_city: Optional[str] = None
+    location_country: Optional[str] = None
 
 class EntryAnalysis(BaseModel):
     """
@@ -1611,7 +1635,8 @@ def get_entries():
     execute_query(cur,
     """
     SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url,
-           location_normalized, location_lat, location_lon, location_osm_id
+           location_normalized, location_lat, location_lon, location_osm_id,
+           location_street, location_number, location_zip, location_city, location_country
     FROM entries
     ORDER BY id DESC
     """
@@ -1635,6 +1660,11 @@ def get_entries():
                 location_lat=r["location_lat"],
                 location_lon=r["location_lon"],
                 location_osm_id=r["location_osm_id"],
+                location_street=r["location_street"],
+                location_number=r["location_number"],
+                location_zip=r["location_zip"],
+                location_city=r["location_city"],
+                location_country=r["location_country"],
             )
         )
     return result
@@ -1668,6 +1698,39 @@ def create_cat(payload: CatCreate):
     return Cat(id=new_id, name=name, createdAt=created_at)
 
 
+def build_location_string(
+    street: Optional[str],
+    number: Optional[str],
+    zip_code: Optional[str],
+    city: Optional[str],
+    country: Optional[str],
+) -> Optional[str]:
+    """Build a combined location string from structured address components."""
+    parts = []
+
+    # Street with number
+    if street:
+        if number:
+            parts.append(f"{street} {number}")
+        else:
+            parts.append(street)
+
+    # City with ZIP
+    city_part = []
+    if zip_code:
+        city_part.append(zip_code)
+    if city:
+        city_part.append(city)
+    if city_part:
+        parts.append(" ".join(city_part))
+
+    # Country
+    if country:
+        parts.append(country)
+
+    return ", ".join(parts) if parts else None
+
+
 @app.post("/entries", response_model=Entry)
 def create_entry(payload: EntryCreate):
     text = payload.text.strip()
@@ -1677,30 +1740,46 @@ def create_entry(payload: EntryCreate):
     created_at = datetime.utcnow().isoformat() + "Z"
 
     nickname = payload.nickname.strip() if payload.nickname and payload.nickname.strip() else None
-    location = payload.location.strip() if payload.location and payload.location.strip() else None
     photo_url = payload.photo_url.strip() if payload.photo_url and payload.photo_url.strip() else None
+
+    # Structured address fields
+    location_street = payload.location_street.strip() if payload.location_street and payload.location_street.strip() else None
+    location_number = payload.location_number.strip() if payload.location_number and payload.location_number.strip() else None
+    location_zip = payload.location_zip.strip() if payload.location_zip and payload.location_zip.strip() else None
+    location_city = payload.location_city.strip() if payload.location_city and payload.location_city.strip() else None
+    location_country = payload.location_country.strip() if payload.location_country and payload.location_country.strip() else None
+
+    # Build combined location string from structured fields, or use legacy field
+    if any([location_street, location_number, location_zip, location_city, location_country]):
+        location = build_location_string(location_street, location_number, location_zip, location_city, location_country)
+    else:
+        location = payload.location.strip() if payload.location and payload.location.strip() else None
 
     conn = get_conn()
     cur = get_cursor(conn)
 
     ph = sql_placeholder()
     if settings.is_postgres:
-        execute_query(cur, 
+        execute_query(cur,
             f"""
-            INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url)
-            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+            INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url,
+                                 location_street, location_number, location_zip, location_city, location_country)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
             RETURNING id
             """,
-            (text, created_at, 0, nickname, location, None, photo_url),
+            (text, created_at, 0, nickname, location, None, photo_url,
+             location_street, location_number, location_zip, location_city, location_country),
         )
         new_id = cur.fetchone()['id']
     else:
-        execute_query(cur, 
+        execute_query(cur,
             f"""
-            INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url)
-            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+            INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url,
+                                 location_street, location_number, location_zip, location_city, location_country)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
             """,
-            (text, created_at, 0, nickname, location, None, photo_url),
+            (text, created_at, 0, nickname, location, None, photo_url,
+             location_street, location_number, location_zip, location_city, location_country),
         )
         new_id = cur.lastrowid
 
@@ -1720,6 +1799,11 @@ def create_entry(payload: EntryCreate):
         location_lat=None,
         location_lon=None,
         location_osm_id=None,
+        location_street=location_street,
+        location_number=location_number,
+        location_zip=location_zip,
+        location_city=location_city,
+        location_country=location_country,
     )
 
 
@@ -1747,6 +1831,11 @@ async def create_entry_with_image(
     text: str = Form(..., min_length=1, max_length=5000),
     nickname: Optional[str] = Form(None, max_length=100),
     location: Optional[str] = Form(None, max_length=200),
+    location_street: Optional[str] = Form(None, max_length=200),
+    location_number: Optional[str] = Form(None, max_length=20),
+    location_zip: Optional[str] = Form(None, max_length=20),
+    location_city: Optional[str] = Form(None, max_length=100),
+    location_country: Optional[str] = Form(None, max_length=100),
     image: Optional[UploadFile] = File(None)
 ):
     """
@@ -1758,7 +1847,8 @@ async def create_entry_with_image(
     Validation:
     - text: 1-5000 characters (required)
     - nickname: max 100 characters (optional)
-    - location: max 200 characters (optional)
+    - location: max 200 characters (optional, legacy field)
+    - location_street/number/zip/city/country: structured address fields (optional)
     - image: max 10MB, types: jpeg/png/webp/gif (optional)
     """
     # Upload image if provided
@@ -1774,7 +1864,19 @@ async def create_entry_with_image(
     created_at = datetime.utcnow().isoformat() + "Z"
 
     nickname_clean = nickname.strip() if nickname and nickname.strip() else None
-    location_clean = location.strip() if location and location.strip() else None
+
+    # Structured address fields
+    street_clean = location_street.strip() if location_street and location_street.strip() else None
+    number_clean = location_number.strip() if location_number and location_number.strip() else None
+    zip_clean = location_zip.strip() if location_zip and location_zip.strip() else None
+    city_clean = location_city.strip() if location_city and location_city.strip() else None
+    country_clean = location_country.strip() if location_country and location_country.strip() else None
+
+    # Build combined location string from structured fields, or use legacy field
+    if any([street_clean, number_clean, zip_clean, city_clean, country_clean]):
+        location_clean = build_location_string(street_clean, number_clean, zip_clean, city_clean, country_clean)
+    else:
+        location_clean = location.strip() if location and location.strip() else None
 
     conn = get_conn()
     cur = get_cursor(conn)
@@ -1783,20 +1885,24 @@ async def create_entry_with_image(
     if settings.is_postgres:
         execute_query(cur,
             f"""
-            INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url)
-            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+            INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url,
+                                 location_street, location_number, location_zip, location_city, location_country)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
             RETURNING id
             """,
-            (text_clean, created_at, 0, nickname_clean, location_clean, None, photo_url),
+            (text_clean, created_at, 0, nickname_clean, location_clean, None, photo_url,
+             street_clean, number_clean, zip_clean, city_clean, country_clean),
         )
         new_id = cur.fetchone()['id']
     else:
         execute_query(cur,
             f"""
-            INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url)
-            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+            INSERT INTO entries (text, createdAt, isFavorite, nickname, location, cat_id, photo_url,
+                                 location_street, location_number, location_zip, location_city, location_country)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
             """,
-            (text_clean, created_at, 0, nickname_clean, location_clean, None, photo_url),
+            (text_clean, created_at, 0, nickname_clean, location_clean, None, photo_url,
+             street_clean, number_clean, zip_clean, city_clean, country_clean),
         )
         new_id = cur.lastrowid
 
@@ -1812,6 +1918,15 @@ async def create_entry_with_image(
         location=location_clean,
         cat_id=None,
         photo_url=photo_url,
+        location_normalized=None,
+        location_lat=None,
+        location_lon=None,
+        location_osm_id=None,
+        location_street=street_clean,
+        location_number=number_clean,
+        location_zip=zip_clean,
+        location_city=city_clean,
+        location_country=country_clean,
     )
 
 
@@ -1828,7 +1943,10 @@ async def update_entry_image(entry_id: int, image: UploadFile = File(...)):
     # Get existing entry
     ph = sql_placeholder()
     execute_query(cur,
-        f"SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url FROM entries WHERE id = {ph}",
+        f"""SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url,
+                   location_normalized, location_lat, location_lon, location_osm_id,
+                   location_street, location_number, location_zip, location_city, location_country
+            FROM entries WHERE id = {ph}""",
         (entry_id,)
     )
     row = cur.fetchone()
@@ -1861,6 +1979,15 @@ async def update_entry_image(entry_id: int, image: UploadFile = File(...)):
         location=row_get(row, "location"),
         cat_id=row_get(row, "cat_id"),
         photo_url=new_url,
+        location_normalized=row_get(row, "location_normalized"),
+        location_lat=row_get(row, "location_lat"),
+        location_lon=row_get(row, "location_lon"),
+        location_osm_id=row_get(row, "location_osm_id"),
+        location_street=row_get(row, "location_street"),
+        location_number=row_get(row, "location_number"),
+        location_zip=row_get(row, "location_zip"),
+        location_city=row_get(row, "location_city"),
+        location_country=row_get(row, "location_country"),
     )
 
 
@@ -1872,9 +1999,11 @@ def toggle_favorite(entry_id: int):
     conn = get_conn()
     cur = get_cursor(conn)
 
-    execute_query(cur, 
+    execute_query(cur,
         """
-        SELECT id, text, createdAt, isFavorite, nickname, location
+        SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url,
+               location_normalized, location_lat, location_lon, location_osm_id,
+               location_street, location_number, location_zip, location_city, location_country
         FROM entries
         WHERE id = ?
         """,
@@ -1887,7 +2016,7 @@ def toggle_favorite(entry_id: int):
 
     new_fav = 0 if row_get(row, "isFavorite") else 1
 
-    execute_query(cur, 
+    execute_query(cur,
         "UPDATE entries SET isFavorite = ? WHERE id = ?",
         (new_fav, entry_id),
     )
@@ -1901,6 +2030,17 @@ def toggle_favorite(entry_id: int):
         isFavorite=bool(new_fav),
         nickname=row["nickname"],
         location=row["location"],
+        cat_id=row["cat_id"],
+        photo_url=row["photo_url"],
+        location_normalized=row["location_normalized"],
+        location_lat=row["location_lat"],
+        location_lon=row["location_lon"],
+        location_osm_id=row["location_osm_id"],
+        location_street=row["location_street"],
+        location_number=row["location_number"],
+        location_zip=row["location_zip"],
+        location_city=row["location_city"],
+        location_country=row["location_country"],
     )
 
 
@@ -2083,7 +2223,8 @@ def assign_entry_to_cat(entry_id: int, cat_id: int):
     # Ensure entry exists
     execute_query(cur,
         """SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url,
-                  location_normalized, location_lat, location_lon, location_osm_id
+                  location_normalized, location_lat, location_lon, location_osm_id,
+                  location_street, location_number, location_zip, location_city, location_country
            FROM entries WHERE id = ?""",
         (entry_id,),
     )
@@ -2099,7 +2240,8 @@ def assign_entry_to_cat(entry_id: int, cat_id: int):
     # Return updated entry
     execute_query(cur,
         """SELECT id, text, createdAt, isFavorite, nickname, location, cat_id, photo_url,
-                  location_normalized, location_lat, location_lon, location_osm_id
+                  location_normalized, location_lat, location_lon, location_osm_id,
+                  location_street, location_number, location_zip, location_city, location_country
            FROM entries WHERE id = ?""",
         (entry_id,),
     )
@@ -2119,6 +2261,11 @@ def assign_entry_to_cat(entry_id: int, cat_id: int):
         location_lat=updated["location_lat"],
         location_lon=updated["location_lon"],
         location_osm_id=updated["location_osm_id"],
+        location_street=updated["location_street"],
+        location_number=updated["location_number"],
+        location_zip=updated["location_zip"],
+        location_city=updated["location_city"],
+        location_country=updated["location_country"],
     )
 
 
