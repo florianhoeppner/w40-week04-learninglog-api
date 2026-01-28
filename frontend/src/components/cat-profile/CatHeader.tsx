@@ -3,15 +3,17 @@
  * Displays cat name, photo, and quick stats in the profile header
  */
 
-import { type EnhancedCatProfile } from "../../api/endpoints";
+import { type EnhancedCatProfile, type CatUpdateResponse } from "../../api/endpoints";
+import { EditableCatName } from "./EditableCatName";
 
 interface CatHeaderProps {
   profile: EnhancedCatProfile;
   onBack: () => void;
   onShare: () => void;
+  onNameUpdated?: (response: CatUpdateResponse) => void;
 }
 
-export function CatHeader({ profile, onBack, onShare }: CatHeaderProps) {
+export function CatHeader({ profile, onBack, onShare, onNameUpdated }: CatHeaderProps) {
   const { cat, stats } = profile;
   const catName = cat.name || `Cat #${cat.id}`;
 
@@ -57,7 +59,11 @@ export function CatHeader({ profile, onBack, onShare }: CatHeaderProps) {
         </div>
 
         <div className="cat-info">
-          <h1 className="cat-name">{catName}</h1>
+          <EditableCatName
+            catId={cat.id}
+            initialName={cat.name}
+            onNameUpdated={onNameUpdated}
+          />
           <p className="cat-meta">
             First seen: {formatDate(stats.firstSeen || cat.createdAt)}
           </p>

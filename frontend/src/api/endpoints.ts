@@ -3,7 +3,7 @@
  * Type-safe API endpoint definitions
  */
 
-import { get, post } from "./client";
+import { get, post, patch, del } from "./client";
 
 // ===========================
 // Type Definitions
@@ -209,6 +209,80 @@ export type LinkSightingsResponse = {
   already_linked: number[];
   newly_linked: number[];
   failed: number[];
+};
+
+// ===========================
+// Paginated Sightings Types (Cat Profile Page)
+// ===========================
+
+/** A sighting in paginated response */
+export type PaginatedSighting = {
+  id: number;
+  text: string;
+  createdAt: string;
+  location?: string | null;
+  location_normalized?: string | null;
+  location_lat?: number | null;
+  location_lon?: number | null;
+  photo_url?: string | null;
+  nickname?: string | null;
+  isFavorite: boolean;
+};
+
+/** Paginated sightings response with metadata */
+export type PaginatedSightingsResponse = {
+  sightings: PaginatedSighting[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+  hasMore: boolean;
+};
+
+// ===========================
+// Cat Update Types (Cat Profile Page)
+// ===========================
+
+/** Payload for updating a cat */
+export type CatUpdatePayload = {
+  name?: string | null;
+};
+
+/** Response after updating a cat */
+export type CatUpdateResponse = {
+  id: number;
+  name?: string | null;
+  updatedAt: string;
+};
+
+// ===========================
+// Cat Comments Types (Community Feature)
+// ===========================
+
+/** Payload for creating a new comment */
+export type CommentCreatePayload = {
+  author_name: string;
+  content: string;
+};
+
+/** A comment on a cat profile */
+export type Comment = {
+  id: number;
+  cat_id: number;
+  author_name: string;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** Paginated comments response */
+export type PaginatedCommentsResponse = {
+  comments: Comment[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+  hasMore: boolean;
 };
 
 // ===========================
@@ -445,6 +519,82 @@ export function createCatFromSightings(
  */
 export function getEnhancedCatProfile(catId: number): Promise<EnhancedCatProfile> {
   return get<EnhancedCatProfile>(`/cats/${catId}/profile/enhanced`);
+}
+
+/**
+ * Get paginated sightings for a specific cat
+ * @param catId The cat ID to fetch sightings for
+ * @param page Page number (1-indexed)
+ * @param limit Items per page (default 20, max 100)
+ */
+export function getCatSightings(
+  catId: number,
+  page: number = 1,
+  limit: number = 20
+): Promise<PaginatedSightingsResponse> {
+  const params = new URLSearchParams({
+    page: page.toString(),
+    limit: limit.toString(),
+  });
+  return get<PaginatedSightingsResponse>(`/cats/${catId}/sightings?${params}`);
+}
+
+/**
+ * Update a cat's details (currently only name)
+ * @param catId The cat ID to update
+ * @param payload The update payload
+ */
+export function updateCat(
+  catId: number,
+  payload: CatUpdatePayload
+): Promise<CatUpdateResponse> {
+  return patch<CatUpdateResponse>(`/cats/${catId}`, payload);
+}
+
+// ===========================
+// Cat Comments Endpoints (Community Feature)
+// ===========================
+
+/**
+ * Get paginated comments for a cat's profile
+ * @param catId The cat ID to fetch comments for
+ * @param page Page number (1-indexed)
+ * @param limit Items per page (default 20, max 100)
+ */
+export function getCatComments(
+  catId: number,
+  page: number = 1,
+  limit: number = 20
+): Promise<PaginatedCommentsResponse> {
+  const params = new URLSearchParams({
+    page: page.toString(),
+    limit: limit.toString(),
+  });
+  return get<PaginatedCommentsResponse>(`/cats/${catId}/comments?${params}`);
+}
+
+/**
+ * Add a new comment to a cat's profile
+ * @param catId The cat ID to add comment to
+ * @param payload The comment content and author name
+ */
+export function createComment(
+  catId: number,
+  payload: CommentCreatePayload
+): Promise<Comment> {
+  return post<Comment>(`/cats/${catId}/comments`, payload);
+}
+
+/**
+ * Delete a comment from a cat's profile
+ * @param catId The cat ID
+ * @param commentId The comment ID to delete
+ */
+export function deleteComment(
+  catId: number,
+  commentId: number
+): Promise<void> {
+  return del<void>(`/cats/${catId}/comments/${commentId}`);
 }
 
 // ===========================

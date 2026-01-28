@@ -584,3 +584,331 @@ def test_reassign_entries_between_cats(client: TestClient):
             updated = e
             break
     assert updated["cat_id"] == cat2["id"]
+
+
+# =============================================================================
+# Cat Profile Page Tests: Paginated Sightings
+# =============================================================================
+
+def test_get_cat_sightings_empty(client: TestClient):
+    """Test getting sightings for a cat with no sightings."""
+    cat = client.post("/cats", json={"name": "Empty Cat"}).json()
+
+    r = client.get(f"/cats/{cat['id']}/sightings")
+    assert r.status_code == 200
+    result = r.json()
+
+    assert result["sightings"] == []
+    assert result["total"] == 0
+    assert result["page"] == 1
+    assert result["totalPages"] == 1
+    assert result["hasMore"] is False
+
+
+def test_get_cat_sightings_with_data(client: TestClient):
+    """Test getting sightings for a cat with assigned sightings."""
+    cat = client.post("/cats", json={"name": "Test Cat"}).json()
+
+    # Create and assign sightings
+    for i in range(5):
+        entry = client.post("/entries", json={
+            "text": f"Sighting number {i+1}",
+            "location": f"Location {i+1}"
+        }).json()
+        client.post(f"/entries/{entry['id']}/assign/{cat['id']}")
+
+    r = client.get(f"/cats/{cat['id']}/sightings")
+    assert r.status_code == 200
+    result = r.json()
+
+    assert len(result["sightings"]) == 5
+    assert result["total"] == 5
+    assert result["page"] == 1
+
+
+def test_get_cat_sightings_pagination(client: TestClient):
+    """Test pagination of cat sightings."""
+    cat = client.post("/cats", json={"name": "Many Sightings Cat"}).json()
+
+    # Create 15 sightings
+    for i in range(15):
+        entry = client.post("/entries", json={"text": f"Sighting {i+1}"}).json()
+        client.post(f"/entries/{entry['id']}/assign/{cat['id']}")
+
+    # Get first page with limit 5
+    r = client.get(f"/cats/{cat['id']}/sightings", params={"page": 1, "limit": 5})
+    assert r.status_code == 200
+    result = r.json()
+
+    assert len(result["sightings"]) == 5
+    assert result["total"] == 15
+    assert result["page"] == 1
+    assert result["totalPages"] == 3
+    assert result["hasMore"] is True
+
+    # Get second page
+    r2 = client.get(f"/cats/{cat['id']}/sightings", params={"page": 2, "limit": 5})
+    result2 = r2.json()
+    assert len(result2["sightings"]) == 5
+    assert result2["page"] == 2
+    assert result2["hasMore"] is True
+
+    # Get third page
+    r3 = client.get(f"/cats/{cat['id']}/sightings", params={"page": 3, "limit": 5})
+    result3 = r3.json()
+    assert len(result3["sightings"]) == 5
+    assert result3["page"] == 3
+    assert result3["hasMore"] is False
+
+
+def test_get_cat_sightings_not_found(client: TestClient):
+    """Test getting sightings for non-existent cat."""
+    r = client.get("/cats/99999/sightings")
+    assert r.status_code == 404
+
+
+# =============================================================================
+# Cat Profile Page Tests: Cat Update
+# =============================================================================
+
+def test_update_cat_name(client: TestClient):
+    """Test updating a cat's name."""
+    cat = client.post("/cats", json={"name": "Old Name"}).json()
+
+    r = client.patch(f"/cats/{cat['id']}", json={"name": "New Name"})
+    assert r.status_code == 200
+    result = r.json()
+
+    assert result["id"] == cat["id"]
+    assert result["name"] == "New Name"
+    assert "updatedAt" in result
+
+
+def test_update_cat_name_to_null(client: TestClient):
+    """Test removing a cat's name."""
+    cat = client.post("/cats", json={"name": "Named Cat"}).json()
+
+    r = client.patch(f"/cats/{cat['id']}", json={"name": None})
+    assert r.status_code == 200
+    result = r.json()
+
+    assert result["name"] is None
+
+
+def test_update_cat_empty_string_becomes_null(client: TestClient):
+    """Test that empty string name becomes null."""
+    cat = client.post("/cats", json={"name": "Test"}).json()
+
+    r = client.patch(f"/cats/{cat['id']}", json={"name": "   "})
+    assert r.status_code == 200
+    result = r.json()
+
+    assert result["name"] is None
+
+
+def test_update_cat_not_found(client: TestClient):
+    """Test updating non-existent cat."""
+    r = client.patch("/cats/99999", json={"name": "New Name"})
+    assert r.status_code == 404
+
+
+# =============================================================================
+# Cat Profile Page Tests: Comments CRUD
+# =============================================================================
+
+def test_create_comment(client: TestClient):
+    """Test creating a comment on a cat profile."""
+    cat = client.post("/cats", json={"name": "Commented Cat"}).json()
+
+    r = client.post(f"/cats/{cat['id']}/comments", json={
+        "author_name": "John Doe",
+        "content": "This is a great cat!"
+    })
+    assert r.status_code == 201
+    comment = r.json()
+
+    assert comment["id"] > 0
+    assert comment["cat_id"] == cat["id"]
+    assert comment["author_name"] == "John Doe"
+    assert comment["content"] == "This is a great cat!"
+    assert "createdAt" in comment
+
+
+def test_create_comment_cat_not_found(client: TestClient):
+    """Test creating comment on non-existent cat."""
+    r = client.post("/cats/99999/comments", json={
+        "author_name": "Test",
+        "content": "Test comment"
+    })
+    assert r.status_code == 404
+
+
+def test_create_comment_validation(client: TestClient):
+    """Test comment validation."""
+    cat = client.post("/cats", json={"name": "Test"}).json()
+
+    # Missing author_name
+    r = client.post(f"/cats/{cat['id']}/comments", json={
+        "content": "Test"
+    })
+    assert r.status_code == 422
+
+    # Missing content
+    r = client.post(f"/cats/{cat['id']}/comments", json={
+        "author_name": "Test"
+    })
+    assert r.status_code == 422
+
+    # Empty author_name
+    r = client.post(f"/cats/{cat['id']}/comments", json={
+        "author_name": "",
+        "content": "Test"
+    })
+    assert r.status_code == 422
+
+
+def test_get_cat_comments(client: TestClient):
+    """Test getting comments for a cat."""
+    cat = client.post("/cats", json={"name": "Test"}).json()
+
+    # Create comments
+    for i in range(3):
+        client.post(f"/cats/{cat['id']}/comments", json={
+            "author_name": f"Author {i+1}",
+            "content": f"Comment {i+1}"
+        })
+
+    r = client.get(f"/cats/{cat['id']}/comments")
+    assert r.status_code == 200
+    result = r.json()
+
+    assert len(result["comments"]) == 3
+    assert result["total"] == 3
+    assert result["page"] == 1
+
+
+def test_get_cat_comments_pagination(client: TestClient):
+    """Test pagination of cat comments."""
+    cat = client.post("/cats", json={"name": "Test"}).json()
+
+    # Create 10 comments
+    for i in range(10):
+        client.post(f"/cats/{cat['id']}/comments", json={
+            "author_name": f"Author {i+1}",
+            "content": f"Comment {i+1}"
+        })
+
+    # Get first page with limit 3
+    r = client.get(f"/cats/{cat['id']}/comments", params={"page": 1, "limit": 3})
+    assert r.status_code == 200
+    result = r.json()
+
+    assert len(result["comments"]) == 3
+    assert result["total"] == 10
+    assert result["totalPages"] == 4
+    assert result["hasMore"] is True
+
+
+def test_get_cat_comments_empty(client: TestClient):
+    """Test getting comments for cat with no comments."""
+    cat = client.post("/cats", json={"name": "Quiet Cat"}).json()
+
+    r = client.get(f"/cats/{cat['id']}/comments")
+    assert r.status_code == 200
+    result = r.json()
+
+    assert result["comments"] == []
+    assert result["total"] == 0
+
+
+def test_get_cat_comments_not_found(client: TestClient):
+    """Test getting comments for non-existent cat."""
+    r = client.get("/cats/99999/comments")
+    assert r.status_code == 404
+
+
+def test_delete_comment(client: TestClient):
+    """Test deleting a comment."""
+    cat = client.post("/cats", json={"name": "Test"}).json()
+
+    # Create comment
+    comment = client.post(f"/cats/{cat['id']}/comments", json={
+        "author_name": "Test",
+        "content": "To be deleted"
+    }).json()
+
+    # Delete it
+    r = client.delete(f"/cats/{cat['id']}/comments/{comment['id']}")
+    assert r.status_code == 204
+
+    # Verify it's gone
+    comments = client.get(f"/cats/{cat['id']}/comments").json()
+    assert comments["total"] == 0
+
+
+def test_delete_comment_not_found(client: TestClient):
+    """Test deleting non-existent comment."""
+    cat = client.post("/cats", json={"name": "Test"}).json()
+
+    r = client.delete(f"/cats/{cat['id']}/comments/99999")
+    assert r.status_code == 404
+
+
+def test_delete_comment_wrong_cat(client: TestClient):
+    """Test deleting comment with wrong cat ID."""
+    cat1 = client.post("/cats", json={"name": "Cat 1"}).json()
+    cat2 = client.post("/cats", json={"name": "Cat 2"}).json()
+
+    # Create comment on cat1
+    comment = client.post(f"/cats/{cat1['id']}/comments", json={
+        "author_name": "Test",
+        "content": "Test"
+    }).json()
+
+    # Try to delete with cat2 ID
+    r = client.delete(f"/cats/{cat2['id']}/comments/{comment['id']}")
+    assert r.status_code == 404
+
+
+# =============================================================================
+# Cat Profile Page Tests: Enhanced Profile Endpoint
+# =============================================================================
+
+def test_enhanced_cat_profile(client: TestClient):
+    """Test the enhanced cat profile endpoint."""
+    cat = client.post("/cats", json={"name": "Profile Cat"}).json()
+
+    # Add sightings
+    for i in range(3):
+        entry = client.post("/entries", json={
+            "text": f"Cat sighting {i+1} - orange tabby",
+            "location": "Central Park",
+            "photo_url": f"https://example.com/cat{i+1}.jpg" if i == 0 else None
+        }).json()
+        client.post(f"/entries/{entry['id']}/assign/{cat['id']}")
+
+    r = client.get(f"/cats/{cat['id']}/profile/enhanced")
+    assert r.status_code == 200
+    profile = r.json()
+
+    # Check structure
+    assert "cat" in profile
+    assert "stats" in profile
+    assert "recentSightings" in profile
+    assert "locationSummary" in profile
+    assert "insightStatus" in profile
+
+    # Check cat info
+    assert profile["cat"]["id"] == cat["id"]
+    assert profile["cat"]["name"] == "Profile Cat"
+    assert profile["cat"]["primaryPhoto"] == "https://example.com/cat1.jpg"
+
+    # Check stats
+    assert profile["stats"]["totalSightings"] == 3
+    assert profile["stats"]["photoCount"] == 1
+
+
+def test_enhanced_cat_profile_not_found(client: TestClient):
+    """Test enhanced profile for non-existent cat."""
+    r = client.get("/cats/99999/profile/enhanced")
+    assert r.status_code == 404
