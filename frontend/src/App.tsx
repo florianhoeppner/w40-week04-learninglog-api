@@ -8,6 +8,7 @@ import {
   getEntryAnalysis,
   findMatches,
   getCatInsights,
+  normalizeEntryLocation,
   type Entry,
   type EntryCreatePayload,
   type EntryAnalysis,
@@ -17,15 +18,28 @@ import {
 import { useMutation } from "./hooks/useMutation";
 import { ImageUpload } from "./components/ImageUpload";
 import { createEntryWithImage } from "./api/upload";
+import { ToastProvider, useToast } from "./components/Toast";
+import { LocationStatus, LocationBadge } from "./components/LocationStatus";
 
 /**
  * CatAtlas - Production Ready
  * - Resilient API client with retry, timeout, and circuit breaker
  * - Comprehensive error handling
  * - Full test coverage
+ * - Location normalization with auto-geocoding
  */
 
 export default function App() {
+  return (
+    <ToastProvider>
+      <AppContent />
+    </ToastProvider>
+  );
+}
+
+function AppContent() {
+  const { showSuccess, showError, showWarning } = useToast();
+
   // ----------------------------
   // Main data state
   // ----------------------------
@@ -33,6 +47,11 @@ export default function App() {
   const [analysisById, setAnalysisById] = useState<Record<number, EntryAnalysis>>({});
   const [matchesById, setMatchesById] = useState<Record<number, MatchCandidate[]>>({});
   const [loadingMatchId, setLoadingMatchId] = useState<number | null>(null);
+
+  // ----------------------------
+  // Location normalization state
+  // ----------------------------
+  const [normalizingEntries, setNormalizingEntries] = useState<Set<number>>(new Set());
 
   // ----------------------------
   // UI state
@@ -182,17 +201,19 @@ export default function App() {
     if (!text) return;
 
     setError(null);
+    let createdEntry: Entry | null = null;
 
     // If there's an image file, use the multipart endpoint
     if (photoFile) {
       try {
-        const created = await createEntryWithImage(
+        createdEntry = await createEntryWithImage(
           text,
           nickname.trim() || null,
           location.trim() || null,
           photoFile
         );
-        setEntries((prev) => [created, ...prev]);
+        setEntries((prev) => [createdEntry!, ...prev]);
+        showSuccess("Sighting added successfully!");
         // Reset form
         setNickname("");
         setLocation("");
@@ -201,6 +222,8 @@ export default function App() {
         setPhotoFile(null);
       } catch (e: any) {
         setError(e.getUserMessage?.() || "Failed to create sighting");
+        showError("Failed to add sighting", e.getUserMessage?.() || "Please try again.");
+        return;
       }
     } else {
       // Use existing JSON endpoint for entries without image upload
@@ -210,7 +233,19 @@ export default function App() {
         location: location.trim() || null,
         photo_url: photoUrl.trim() || null,
       };
-      await createEntryMutation.mutateAsync(payload);
+      try {
+        createdEntry = await createEntryMutation.mutateAsync(payload);
+        showSuccess("Sighting added successfully!");
+      } catch (e: any) {
+        // Error already handled by mutation onError
+        return;
+      }
+    }
+
+    // Auto-normalize location in background (non-blocking)
+    if (createdEntry && createdEntry.location) {
+      // Don't await - run in background
+      normalizeLocation(createdEntry.id, true);
     }
   }
 
@@ -241,6 +276,94 @@ export default function App() {
       // 404 is expected when no analysis exists
       if (e.details?.statusCode === 404) return;
       // Silently ignore other errors for now
+    }
+  }
+
+  // ----------------------------
+  // Location normalization
+  // ----------------------------
+
+  async function normalizeLocation(entryId: number, showFeedback: boolean = true) {
+    // Mark as normalizing
+    setNormalizingEntries((prev) => new Set(prev).add(entryId));
+
+    try {
+      const result = await normalizeEntryLocation(entryId);
+
+      if (result.status === "success") {
+        // Update the entry with normalized location
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === entryId
+              ? {
+                  ...e,
+                  location_normalized: result.normalized_location,
+                  location_lat: result.latitude,
+                  location_lon: result.longitude,
+                  location_osm_id: result.osm_id,
+                }
+              : e
+          )
+        );
+
+        if (showFeedback) {
+          const shortLocation = result.normalized_location?.split(",")[0] || "Location";
+          showSuccess(`Location verified: ${shortLocation}`);
+        }
+      } else if (result.status === "not_found") {
+        if (showFeedback) {
+          showWarning("Location not found on map. You can edit it later.");
+        }
+      } else if (result.status === "already_normalized") {
+        // Already done, no action needed
+      }
+      // "no_location" status means entry has no location to normalize
+    } catch (e: any) {
+      console.error("Location normalization failed:", e);
+      if (showFeedback) {
+        showWarning("Location verification delayed. Will retry automatically.");
+      }
+    } finally {
+      setNormalizingEntries((prev) => {
+        const next = new Set(prev);
+        next.delete(entryId);
+        return next;
+      });
+    }
+  }
+
+  async function retryNormalizeLocation(entryId: number) {
+    setNormalizingEntries((prev) => new Set(prev).add(entryId));
+
+    try {
+      const result = await normalizeEntryLocation(entryId, true);
+
+      if (result.status === "success") {
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === entryId
+              ? {
+                  ...e,
+                  location_normalized: result.normalized_location,
+                  location_lat: result.latitude,
+                  location_lon: result.longitude,
+                  location_osm_id: result.osm_id,
+                }
+              : e
+          )
+        );
+        showSuccess("Location verified!");
+      } else {
+        showWarning("Location could not be verified. Try a different address.");
+      }
+    } catch (e: any) {
+      showError("Verification failed", "Please try again later.");
+    } finally {
+      setNormalizingEntries((prev) => {
+        const next = new Set(prev);
+        next.delete(entryId);
+        return next;
+      });
     }
   }
 
@@ -434,13 +557,23 @@ export default function App() {
 
               return (
                 <li key={e.id} className="entry-item">
-                  <div style={{ fontWeight: 800 }}>
-                    {e.nickname ? e.nickname : `Cat #${e.id}`}
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontWeight: 800 }}>
+                      {e.nickname ? e.nickname : `Cat #${e.id}`}
+                    </span>
+                    {e.location && (
+                      <LocationBadge entry={e} />
+                    )}
                   </div>
 
                   {e.location && (
-                    <div style={{ color: "#555", marginTop: 4 }}>
-                      📍 {e.location}
+                    <div style={{ color: "#555", marginTop: 4, display: "flex", alignItems: "center", gap: 8 }}>
+                      <span>📍 {e.location}</span>
+                      <LocationStatus
+                        entry={e}
+                        isNormalizing={normalizingEntries.has(e.id)}
+                        onRetryNormalize={retryNormalizeLocation}
+                      />
                     </div>
                   )}
                   {e.photo_url && (
