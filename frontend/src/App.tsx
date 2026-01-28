@@ -6,7 +6,6 @@ import {
   toggleEntryFavorite,
   analyzeEntry,
   getEntryAnalysis,
-  findMatches,
   getCatInsights,
   normalizeEntryLocation,
   type Entry,
@@ -20,6 +19,7 @@ import { ImageUpload } from "./components/ImageUpload";
 import { createEntryWithImage } from "./api/upload";
 import { ToastProvider, useToast } from "./components/Toast";
 import { LocationStatus, LocationBadge } from "./components/LocationStatus";
+import { SimilarNearbyPanel } from "./components/SimilarNearbyPanel";
 
 /**
  * CatAtlas - Production Ready
@@ -45,13 +45,18 @@ function AppContent() {
   // ----------------------------
   const [entries, setEntries] = useState<Entry[]>([]);
   const [analysisById, setAnalysisById] = useState<Record<number, EntryAnalysis>>({});
-  const [matchesById, setMatchesById] = useState<Record<number, MatchCandidate[]>>({});
-  const [loadingMatchId, setLoadingMatchId] = useState<number | null>(null);
+  // Matches are now displayed in SimilarNearbyPanel, but we keep this for inline display
+  const [matchesById] = useState<Record<number, MatchCandidate[]>>({});
 
   // ----------------------------
   // Location normalization state
   // ----------------------------
   const [normalizingEntries, setNormalizingEntries] = useState<Set<number>>(new Set());
+
+  // ----------------------------
+  // Similar/Nearby panel state
+  // ----------------------------
+  const [similarPanelEntry, setSimilarPanelEntry] = useState<Entry | null>(null);
 
   // ----------------------------
   // UI state
@@ -181,20 +186,8 @@ function AppContent() {
     }
   }
 
-  async function findMatchesForEntry(entryId: number) {
-    setLoadingMatchId(entryId);
-    setError(null);
-
-    try {
-      const data = await findMatches(entryId, 5, 0.15);
-      setMatchesById((prev) => ({ ...prev, [entryId]: data }));
-    } catch (e: any) {
-      console.error(e);
-      setError(e.getUserMessage?.() || "Could not load matches.");
-    } finally {
-      setLoadingMatchId(null);
-    }
-  }
+  // Legacy matches are now handled by SimilarNearbyPanel
+  // Keeping matchesById state for backward compatibility with inline match display
 
   async function addSighting() {
     const text = notes.trim();
@@ -365,6 +358,32 @@ function AppContent() {
         return next;
       });
     }
+  }
+
+  // ----------------------------
+  // Similar/Nearby panel handlers
+  // ----------------------------
+
+  function openSimilarPanel(entry: Entry) {
+    setSimilarPanelEntry(entry);
+  }
+
+  function closeSimilarPanel() {
+    setSimilarPanelEntry(null);
+  }
+
+  function handleCreateCatFromSightings(entryIds: number[]) {
+    // For now, just show a message. Phase 3 will add the actual modal.
+    showSuccess(`Ready to create cat from ${entryIds.length} sightings`);
+    closeSimilarPanel();
+    // TODO: Open CreateCatModal in Phase 3
+  }
+
+  function handleLinkToExistingCat(entryIds: number[]) {
+    // For now, just show a message. Phase 3 will add the actual modal.
+    showSuccess(`Ready to link ${entryIds.length} sightings to a cat`);
+    closeSimilarPanel();
+    // TODO: Open LinkToCatModal in Phase 3
   }
 
   // ----------------------------
@@ -606,11 +625,10 @@ function AppContent() {
 
                     <button
                       type="button"
-                      onClick={() => findMatchesForEntry(e.id)}
-                      disabled={loadingMatchId === e.id}
-                      title="Suggest similar cats based on notes + location (text-only)"
+                      onClick={() => openSimilarPanel(e)}
+                      title="Find similar and nearby sightings"
                     >
-                      {loadingMatchId === e.id ? "Matching…" : "Find matches"}
+                      Find Similar
                     </button>
 
                     {catId != null && (
@@ -742,6 +760,17 @@ function AppContent() {
           )}
         </ul>
       </section>
+
+      {/* Similar/Nearby Panel */}
+      {similarPanelEntry && (
+        <SimilarNearbyPanel
+          entry={similarPanelEntry}
+          isOpen={true}
+          onClose={closeSimilarPanel}
+          onCreateCat={handleCreateCatFromSightings}
+          onLinkToCat={handleLinkToExistingCat}
+        />
+      )}
     </main>
   );
 }
