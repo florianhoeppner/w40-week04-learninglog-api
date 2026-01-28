@@ -20,6 +20,8 @@ import { createEntryWithImage } from "./api/upload";
 import { ToastProvider, useToast } from "./components/Toast";
 import { LocationStatus, LocationBadge } from "./components/LocationStatus";
 import { SimilarNearbyPanel } from "./components/SimilarNearbyPanel";
+import { CreateCatModal } from "./components/CreateCatModal";
+import { LinkToCatModal } from "./components/LinkToCatModal";
 
 /**
  * CatAtlas - Production Ready
@@ -57,6 +59,12 @@ function AppContent() {
   // Similar/Nearby panel state
   // ----------------------------
   const [similarPanelEntry, setSimilarPanelEntry] = useState<Entry | null>(null);
+
+  // ----------------------------
+  // Create/Link Cat modal state
+  // ----------------------------
+  const [createCatEntryIds, setCreateCatEntryIds] = useState<number[] | null>(null);
+  const [linkToCatEntryIds, setLinkToCatEntryIds] = useState<number[] | null>(null);
 
   // ----------------------------
   // UI state
@@ -373,17 +381,25 @@ function AppContent() {
   }
 
   function handleCreateCatFromSightings(entryIds: number[]) {
-    // For now, just show a message. Phase 3 will add the actual modal.
-    showSuccess(`Ready to create cat from ${entryIds.length} sightings`);
     closeSimilarPanel();
-    // TODO: Open CreateCatModal in Phase 3
+    setCreateCatEntryIds(entryIds);
   }
 
   function handleLinkToExistingCat(entryIds: number[]) {
-    // For now, just show a message. Phase 3 will add the actual modal.
-    showSuccess(`Ready to link ${entryIds.length} sightings to a cat`);
     closeSimilarPanel();
-    // TODO: Open LinkToCatModal in Phase 3
+    setLinkToCatEntryIds(entryIds);
+  }
+
+  function handleCatCreated() {
+    setCreateCatEntryIds(null);
+    // Refresh entries to get updated cat_id assignments
+    loadEntries();
+  }
+
+  function handleSightingsLinked() {
+    setLinkToCatEntryIds(null);
+    // Refresh entries to get updated cat_id assignments
+    loadEntries();
   }
 
   // ----------------------------
@@ -769,6 +785,26 @@ function AppContent() {
           onClose={closeSimilarPanel}
           onCreateCat={handleCreateCatFromSightings}
           onLinkToCat={handleLinkToExistingCat}
+        />
+      )}
+
+      {/* Create Cat Modal */}
+      {createCatEntryIds && (
+        <CreateCatModal
+          selectedEntryIds={createCatEntryIds}
+          entries={entries}
+          onClose={() => setCreateCatEntryIds(null)}
+          onSuccess={handleCatCreated}
+        />
+      )}
+
+      {/* Link to Cat Modal */}
+      {linkToCatEntryIds && (
+        <LinkToCatModal
+          selectedEntryIds={linkToCatEntryIds}
+          entries={entries}
+          onClose={() => setLinkToCatEntryIds(null)}
+          onSuccess={handleSightingsLinked}
         />
       )}
     </main>
