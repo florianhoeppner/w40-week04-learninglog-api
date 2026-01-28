@@ -392,6 +392,66 @@ class CatProfile(BaseModel):
     profile_text: str
 
 
+# Enhanced Cat Profile models for the dedicated Cat Profile page
+class CatBasicInfo(BaseModel):
+    """Basic cat information for profile header."""
+    id: int
+    name: Optional[str] = None
+    createdAt: str
+    primaryPhoto: Optional[str] = None
+
+
+class CatStats(BaseModel):
+    """Aggregated statistics for a cat."""
+    totalSightings: int
+    uniqueLocations: int
+    photoCount: int
+    firstSeen: Optional[str] = None
+    lastSeen: Optional[str] = None
+    mostFrequentLocation: Optional[str] = None
+
+
+class LocationSummary(BaseModel):
+    """Summary of sightings at a specific location."""
+    location: str
+    normalizedLocation: Optional[str] = None
+    count: int
+    lastSeen: str
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+
+
+class InsightStatus(BaseModel):
+    """Status of AI-generated insights for a cat."""
+    hasProfile: bool = False
+    hasCare: bool = False
+    hasUpdate: bool = False
+    hasRisk: bool = False
+    lastUpdated: Optional[str] = None
+
+
+class RecentSighting(BaseModel):
+    """Simplified sighting for profile preview."""
+    id: int
+    text: str
+    createdAt: str
+    location: Optional[str] = None
+    photo_url: Optional[str] = None
+
+
+class EnhancedCatProfile(BaseModel):
+    """Enhanced cat profile with stats for dedicated profile page."""
+    cat: CatBasicInfo
+    stats: CatStats
+    recentSightings: List[RecentSighting]
+    locationSummary: List[LocationSummary]
+    insightStatus: InsightStatus
+    # Legacy fields for backward compatibility
+    top_tags: List[str]
+    temperament_guess: str
+    profile_text: str
+
+
 class Entry(BaseModel):
     """
     What the API returns for a stored sighting/entry.
@@ -1400,6 +1460,187 @@ def cat_profile(cat_id: int):
         profile_text=profile_text,
     )
 
+
+@app.get("/cats/{cat_id}/profile/enhanced", response_model=EnhancedCatProfile)
+def enhanced_cat_profile(cat_id: int):
+    """
+    Enhanced cat profile with aggregated stats for the dedicated Cat Profile page.
+
+    Returns:
+    - Basic cat info with primary photo
+    - Statistics (total sightings, unique locations, photos, date range)
+    - Recent sightings preview (last 5)
+    - Location summary with counts
+    - Insight generation status
+    - Legacy profile text for backward compatibility
+    """
+    conn = get_conn()
+    cur = get_cursor(conn)
+
+    # Load cat with createdAt
+    execute_query(cur, "SELECT id, name, createdAt FROM cats WHERE id = ?", (cat_id,))
+    cat_row = cur.fetchone()
+    if cat_row is None:
+        conn.close()
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "CAT_NOT_FOUND", "message": f"Cat with ID {cat_id} not found", "retryable": False}
+        )
+
+    # Load all sightings for this cat with full details
+    execute_query(cur,
+        """
+        SELECT id, text, createdAt, location, location_normalized,
+               location_lat, location_lon, photo_url
+        FROM entries
+        WHERE cat_id = ?
+        ORDER BY createdAt DESC
+        """,
+        (cat_id,),
+    )
+    sightings = cur.fetchall()
+
+    # Check insight status
+    execute_query(cur,
+        """
+        SELECT mode, updatedAt FROM cat_insights
+        WHERE cat_id = ?
+        """,
+        (cat_id,),
+    )
+    insight_rows = cur.fetchall()
+    conn.close()
+
+    # Process sightings data
+    total_sightings = len(sightings)
+
+    # Compute stats
+    unique_locations_set = set()
+    location_counts = {}
+    location_details = {}
+    photo_count = 0
+    first_seen = None
+    last_seen = None
+    primary_photo = None
+
+    for s in sightings:
+        loc = s["location"] or s["location_normalized"]
+        created_at = row_get(s, "createdAt") or row_get(s, "createdat")
+
+        # Track dates
+        if created_at:
+            if last_seen is None:
+                last_seen = created_at  # First row is most recent
+            first_seen = created_at  # Last row will be oldest
+
+        # Track locations
+        if loc:
+            unique_locations_set.add(loc)
+            location_counts[loc] = location_counts.get(loc, 0) + 1
+            # Store details for location summary
+            if loc not in location_details:
+                location_details[loc] = {
+                    "normalized": s["location_normalized"],
+                    "lat": s["location_lat"],
+                    "lon": s["location_lon"],
+                    "lastSeen": created_at,
+                }
+
+        # Track photos
+        if s["photo_url"]:
+            photo_count += 1
+            if primary_photo is None:
+                primary_photo = s["photo_url"]
+
+    # Find most frequent location
+    most_frequent_location = None
+    if location_counts:
+        most_frequent_location = max(location_counts.items(), key=lambda x: x[1])[0]
+
+    # Build location summary (sorted by count descending)
+    location_summary = []
+    for loc, count in sorted(location_counts.items(), key=lambda x: -x[1])[:10]:
+        details = location_details.get(loc, {})
+        location_summary.append(LocationSummary(
+            location=loc,
+            normalizedLocation=details.get("normalized"),
+            count=count,
+            lastSeen=details.get("lastSeen", ""),
+            lat=details.get("lat"),
+            lon=details.get("lon"),
+        ))
+
+    # Build recent sightings (top 5)
+    recent_sightings = []
+    for s in sightings[:5]:
+        created_at = row_get(s, "createdAt") or row_get(s, "createdat")
+        recent_sightings.append(RecentSighting(
+            id=s["id"],
+            text=s["text"],
+            createdAt=created_at or "",
+            location=s["location"],
+            photo_url=s["photo_url"],
+        ))
+
+    # Build insight status
+    insight_modes = {row_get(r, "mode"): row_get(r, "updatedAt") or row_get(r, "updatedat") for r in insight_rows}
+    latest_insight_update = max(insight_modes.values()) if insight_modes else None
+    insight_status = InsightStatus(
+        hasProfile="profile" in insight_modes,
+        hasCare="care" in insight_modes,
+        hasUpdate="update" in insight_modes,
+        hasRisk="risk" in insight_modes,
+        lastUpdated=latest_insight_update,
+    )
+
+    # Generate legacy profile text
+    all_text = "\n".join([s["text"] for s in sightings if s["text"]])
+    tags = baseline_tags(all_text, k=8) if all_text else []
+    sentiment = baseline_sentiment(all_text) if all_text else "neutral"
+    temperament_guess = (
+        "friendly" if sentiment == "positive"
+        else "defensive / cautious" if sentiment == "negative"
+        else "unknown / neutral"
+    )
+
+    cat_name = cat_row["name"] or f"Cat #{cat_id}"
+    location_hint = most_frequent_location or "unknown area"
+
+    if total_sightings == 0:
+        profile_text = "No sightings assigned yet. Assign sightings to build a profile."
+    else:
+        summary = baseline_summary(all_text, max_len=220)
+        profile_text = (
+            f"{cat_name} is a community-tracked street cat most often seen around {location_hint}. "
+            f"Based on {total_sightings} sighting(s), the current temperament guess is '{temperament_guess}'. "
+            f"Common tags from notes: {', '.join(tags) if tags else 'none yet'}. "
+            f"Summary of recent notes: {summary}"
+        )
+
+    cat_created_at = row_get(cat_row, "createdAt") or row_get(cat_row, "createdat") or ""
+
+    return EnhancedCatProfile(
+        cat=CatBasicInfo(
+            id=cat_id,
+            name=cat_row["name"],
+            createdAt=cat_created_at,
+            primaryPhoto=primary_photo,
+        ),
+        stats=CatStats(
+            totalSightings=total_sightings,
+            uniqueLocations=len(unique_locations_set),
+            photoCount=photo_count,
+            firstSeen=first_seen,
+            lastSeen=last_seen,
+            mostFrequentLocation=most_frequent_location,
+        ),
+        recentSightings=recent_sightings,
+        locationSummary=location_summary,
+        insightStatus=insight_status,
+        top_tags=tags,
+        temperament_guess=temperament_guess,
+        profile_text=profile_text,
+    )
 
 
 @app.get("/entries/{entry_id}/matches", response_model=List[MatchCandidate])

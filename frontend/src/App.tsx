@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Routes, Route, Link } from "react-router-dom";
 import "./App.css";
 import {
   getEntries,
@@ -23,6 +24,7 @@ import { SimilarNearbyPanel } from "./components/SimilarNearbyPanel";
 import { CreateCatModal } from "./components/CreateCatModal";
 import { LinkToCatModal } from "./components/LinkToCatModal";
 import { SightingsMap } from "./components/SightingsMap";
+import { CatProfilePage } from "./pages/CatProfilePage";
 
 /**
  * CatAtlas - Production Ready
@@ -30,12 +32,16 @@ import { SightingsMap } from "./components/SightingsMap";
  * - Comprehensive error handling
  * - Full test coverage
  * - Location normalization with auto-geocoding
+ * - Shareable cat profile pages with React Router
  */
 
 export default function App() {
   return (
     <ToastProvider>
-      <AppContent />
+      <Routes>
+        <Route path="/" element={<AppContent />} />
+        <Route path="/cats/:catId" element={<CatProfilePage />} />
+      </Routes>
     </ToastProvider>
   );
 }
@@ -729,10 +735,27 @@ function AppContent() {
 
               return (
                 <li key={e.id} className="entry-item">
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <span style={{ fontWeight: 800 }}>
-                      {e.nickname ? e.nickname : `Cat #${e.id}`}
+                      {e.nickname ? e.nickname : `Sighting #${e.id}`}
                     </span>
+                    {catId != null && (
+                      <Link
+                        to={`/cats/${catId}`}
+                        style={{
+                          padding: "2px 8px",
+                          backgroundColor: "var(--accent)",
+                          color: "white",
+                          borderRadius: "999px",
+                          textDecoration: "none",
+                          fontSize: "0.75rem",
+                          fontWeight: 500,
+                        }}
+                        title={`Linked to Cat #${catId}`}
+                      >
+                        Cat #{catId}
+                      </Link>
+                    )}
                     {e.location && (
                       <LocationBadge entry={e} />
                     )}
@@ -785,13 +808,28 @@ function AppContent() {
                     </button>
 
                     {catId != null && (
-                      <button
-                        type="button"
-                        onClick={() => fetchCatInsights(catId, "profile")}
-                        title="Generate an AI-style profile for this cat"
-                      >
-                        Get cat profile (AI)
-                      </button>
+                      <>
+                        <Link
+                          to={`/cats/${catId}`}
+                          style={{
+                            padding: "6px 12px",
+                            backgroundColor: "var(--accent)",
+                            color: "white",
+                            borderRadius: "6px",
+                            textDecoration: "none",
+                            fontSize: "0.9rem",
+                          }}
+                        >
+                          View Profile
+                        </Link>
+                        <button
+                          type="button"
+                          onClick={() => fetchCatInsights(catId, "profile")}
+                          title="Generate an AI-style profile for this cat"
+                        >
+                          Get cat profile (AI)
+                        </button>
+                      </>
                     )}
                   </div>
 
