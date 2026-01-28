@@ -1643,6 +1643,168 @@ def enhanced_cat_profile(cat_id: int):
     )
 
 
+# -----------------------------------------------------------------------------
+# Paginated Cat Sightings
+# -----------------------------------------------------------------------------
+
+class PaginatedSighting(BaseModel):
+    """Individual sighting in paginated response."""
+    id: int
+    text: str
+    createdAt: str
+    location: Optional[str] = None
+    location_normalized: Optional[str] = None
+    location_lat: Optional[float] = None
+    location_lon: Optional[float] = None
+    photo_url: Optional[str] = None
+    nickname: Optional[str] = None
+    isFavorite: bool = False
+
+
+class PaginatedSightingsResponse(BaseModel):
+    """Paginated sightings response with metadata."""
+    sightings: List[PaginatedSighting]
+    total: int
+    page: int
+    limit: int
+    totalPages: int
+    hasMore: bool
+
+
+@app.get("/cats/{cat_id}/sightings", response_model=PaginatedSightingsResponse)
+def get_cat_sightings(
+    cat_id: int,
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+    limit: int = Query(20, ge=1, le=100, description="Items per page"),
+):
+    """
+    Get paginated sightings for a specific cat.
+
+    Supports offset-based pagination with configurable page size.
+    Returns sightings ordered by date (newest first).
+    """
+    conn = get_conn()
+    cur = get_cursor(conn)
+
+    # Verify cat exists
+    execute_query(cur, "SELECT id FROM cats WHERE id = ?", (cat_id,))
+    cat_row = cur.fetchone()
+    if cat_row is None:
+        conn.close()
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "CAT_NOT_FOUND", "message": f"Cat with ID {cat_id} not found", "retryable": False}
+        )
+
+    # Get total count
+    execute_query(cur, "SELECT COUNT(*) as count FROM entries WHERE cat_id = ?", (cat_id,))
+    total = cur.fetchone()["count"]
+
+    # Calculate pagination
+    offset = (page - 1) * limit
+    total_pages = max(1, (total + limit - 1) // limit)
+
+    # Fetch sightings for this page
+    execute_query(cur,
+        """
+        SELECT id, text, createdAt, location, location_normalized,
+               location_lat, location_lon, photo_url, nickname, isFavorite
+        FROM entries
+        WHERE cat_id = ?
+        ORDER BY createdAt DESC
+        LIMIT ? OFFSET ?
+        """,
+        (cat_id, limit, offset),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    sightings = []
+    for row in rows:
+        created_at = row_get(row, "createdAt") or row_get(row, "createdat") or ""
+        is_favorite = row_get(row, "isFavorite") or row_get(row, "isfavorite") or False
+        sightings.append(PaginatedSighting(
+            id=row["id"],
+            text=row["text"],
+            createdAt=created_at,
+            location=row["location"],
+            location_normalized=row["location_normalized"],
+            location_lat=row["location_lat"],
+            location_lon=row["location_lon"],
+            photo_url=row["photo_url"],
+            nickname=row["nickname"],
+            isFavorite=bool(is_favorite),
+        ))
+
+    return PaginatedSightingsResponse(
+        sightings=sightings,
+        total=total,
+        page=page,
+        limit=limit,
+        totalPages=total_pages,
+        hasMore=page < total_pages,
+    )
+
+
+# -----------------------------------------------------------------------------
+# Update Cat (name editing)
+# -----------------------------------------------------------------------------
+
+class CatUpdatePayload(BaseModel):
+    """Payload for updating a cat."""
+    name: Optional[str] = None
+
+
+class CatUpdateResponse(BaseModel):
+    """Response after updating a cat."""
+    id: int
+    name: Optional[str] = None
+    updatedAt: str
+
+
+@app.patch("/cats/{cat_id}", response_model=CatUpdateResponse)
+def update_cat(cat_id: int, payload: CatUpdatePayload):
+    """
+    Update a cat's details (currently only name).
+
+    The name can be set to null to remove it, or to a non-empty string.
+    Empty strings are converted to null.
+    """
+    conn = get_conn()
+    cur = get_cursor(conn)
+
+    # Verify cat exists
+    execute_query(cur, "SELECT id, name FROM cats WHERE id = ?", (cat_id,))
+    cat_row = cur.fetchone()
+    if cat_row is None:
+        conn.close()
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "CAT_NOT_FOUND", "message": f"Cat with ID {cat_id} not found", "retryable": False}
+        )
+
+    # Process name: empty string becomes null, otherwise trim
+    new_name = payload.name
+    if new_name is not None:
+        new_name = new_name.strip() if new_name.strip() else None
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Update the cat
+    execute_query(cur,
+        "UPDATE cats SET name = ?, updatedAt = ? WHERE id = ?",
+        (new_name, now, cat_id),
+    )
+    conn.commit()
+    conn.close()
+
+    return CatUpdateResponse(
+        id=cat_id,
+        name=new_name,
+        updatedAt=now,
+    )
+
+
 @app.get("/entries/{entry_id}/matches", response_model=List[MatchCandidate])
 def find_matches(
     entry_id: int,

@@ -7,7 +7,8 @@ import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useCatProfile } from "../hooks/useCatProfile";
 import { CatHeader } from "../components/cat-profile/CatHeader";
-import type { EnhancedCatProfile } from "../api/endpoints";
+import type { EnhancedCatProfile, CatUpdateResponse, PaginatedSighting } from "../api/endpoints";
+import { getCatSightings } from "../api/endpoints";
 
 type TabType = "overview" | "sightings" | "locations" | "photos" | "insights";
 
@@ -32,6 +33,11 @@ export function CatProfilePage() {
   }
 
   const { profile, loading, error, refetch } = useCatProfile(numericCatId);
+
+  const handleNameUpdated = (_response: CatUpdateResponse) => {
+    // Refetch the profile to get updated name
+    refetch();
+  };
 
   const handleBack = () => {
     navigate(-1);
@@ -112,7 +118,12 @@ export function CatProfilePage() {
     <div className="cat-profile-page">
       {shareMessage && <div className="share-toast">{shareMessage}</div>}
 
-      <CatHeader profile={profile} onBack={handleBack} onShare={handleShare} />
+      <CatHeader
+        profile={profile}
+        onBack={handleBack}
+        onShare={handleShare}
+        onNameUpdated={handleNameUpdated}
+      />
 
       <div className="cat-profile-tabs">
         <TabButton
@@ -299,9 +310,42 @@ function OverviewTab({ profile }: { profile: EnhancedCatProfile }) {
   );
 }
 
-// Sightings tab content (placeholder for pagination in Phase 1)
+// Sightings tab content with pagination
 function SightingsTab({ profile }: { profile: EnhancedCatProfile }) {
-  if (profile.recentSightings.length === 0) {
+  const [sightings, setSightings] = useState<PaginatedSighting[]>([]);
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [initialized, setInitialized] = useState(false);
+  const ITEMS_PER_PAGE = 10;
+
+  // Fetch sightings when page changes
+  const fetchSightings = async (pageNum: number) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await getCatSightings(profile.cat.id, pageNum, ITEMS_PER_PAGE);
+      setSightings(response.sightings);
+      setTotalPages(response.totalPages);
+      setTotal(response.total);
+      setPage(response.page);
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : "Failed to load sightings";
+      setError(errorMessage);
+    } finally {
+      setLoading(false);
+      setInitialized(true);
+    }
+  };
+
+  // Initial load
+  if (!initialized && !loading) {
+    fetchSightings(1);
+  }
+
+  if (profile.stats.totalSightings === 0) {
     return (
       <div className="empty-state">
         <p>No sightings recorded yet.</p>
@@ -309,39 +353,79 @@ function SightingsTab({ profile }: { profile: EnhancedCatProfile }) {
     );
   }
 
+  if (error) {
+    return (
+      <div className="error-state">
+        <p>Error loading sightings: {error}</p>
+        <button onClick={() => fetchSightings(page)}>Try Again</button>
+      </div>
+    );
+  }
+
   return (
     <div className="sightings-tab">
       <p className="tab-description">
-        Showing {profile.recentSightings.length} of {profile.stats.totalSightings}{" "}
-        sightings. Full pagination coming soon.
+        Showing page {page} of {totalPages} ({total} total sightings)
       </p>
-      <ul className="sighting-list">
-        {profile.recentSightings.map((sighting) => (
-          <li key={sighting.id} className="sighting-card">
-            <div className="sighting-header">
-              <span className="sighting-date">
-                {new Date(sighting.createdAt).toLocaleString()}
+
+      {loading ? (
+        <div className="loading-state">Loading sightings...</div>
+      ) : (
+        <>
+          <div className="sightings-list">
+            {sightings.map((sighting) => (
+              <div key={sighting.id} className="sighting-card">
+                <div className="sighting-header">
+                  <div>
+                    <span className="sighting-meta">
+                      {new Date(sighting.createdAt).toLocaleString()}
+                    </span>
+                    {sighting.nickname && (
+                      <span className="sighting-nickname"> - {sighting.nickname}</span>
+                    )}
+                  </div>
+                  {sighting.isFavorite && (
+                    <span className="sighting-favorite">Favorite</span>
+                  )}
+                </div>
+                {sighting.location && (
+                  <p className="sighting-location">&#128205; {sighting.location}</p>
+                )}
+                <p className="sighting-text">{sighting.text}</p>
+                {sighting.photo_url && (
+                  <img
+                    src={sighting.photo_url}
+                    alt="Sighting"
+                    className="sighting-photo"
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+
+          {totalPages > 1 && (
+            <div className="pagination-controls">
+              <button
+                className="pagination-btn"
+                onClick={() => fetchSightings(page - 1)}
+                disabled={page <= 1 || loading}
+              >
+                Previous
+              </button>
+              <span className="pagination-info">
+                Page {page} of {totalPages}
               </span>
-              {sighting.photo_url && (
-                <span className="photo-indicator" title="Has photo">
-                  &#128247;
-                </span>
-              )}
+              <button
+                className="pagination-btn"
+                onClick={() => fetchSightings(page + 1)}
+                disabled={page >= totalPages || loading}
+              >
+                Next
+              </button>
             </div>
-            <p className="sighting-text">{sighting.text}</p>
-            {sighting.location && (
-              <p className="sighting-location">&#128205; {sighting.location}</p>
-            )}
-            {sighting.photo_url && (
-              <img
-                src={sighting.photo_url}
-                alt="Sighting"
-                className="sighting-photo"
-              />
-            )}
-          </li>
-        ))}
-      </ul>
+          )}
+        </>
+      )}
     </div>
   );
 }

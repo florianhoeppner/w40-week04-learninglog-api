@@ -689,3 +689,217 @@ button:disabled {
     align-items: center;
   }
 }
+
+/* ===========================
+   Editable Cat Name Component
+   =========================== */
+
+.editable-name-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.editable-name-input {
+  font-size: 1.75rem;
+  font-weight: 700;
+  padding: 8px 12px;
+  border: 2px solid var(--accent);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
+  width: 100%;
+  max-width: 300px;
+}
+
+.editable-name-input:focus {
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.3);
+}
+
+.editable-name-input:disabled {
+  opacity: 0.6;
+}
+
+.editable-name-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.editable-name-save,
+.editable-name-cancel {
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.editable-name-save {
+  background: var(--accent);
+  color: white;
+  border: none;
+}
+
+.editable-name-save:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.editable-name-save:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.editable-name-cancel {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.editable-name-cancel:hover:not(:disabled) {
+  background: var(--border);
+}
+
+.editable-name-cancel:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.editable-name-error {
+  color: #ef4444;
+  font-size: 0.875rem;
+}
+
+.editable-name-display {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  padding: 4px 8px;
+  margin: -4px -8px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.editable-name-display:hover {
+  background: var(--border);
+}
+
+.editable-name-text {
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.editable-name-icon {
+  font-size: 1rem;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.editable-name-display:hover .editable-name-icon {
+  opacity: 1;
+}
+
+/* ===========================
+   Paginated Sightings List
+   =========================== */
+
+.sightings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sighting-card {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card-bg);
+}
+
+.sighting-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+
+.sighting-meta {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+.sighting-location {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.sighting-text {
+  margin: 12px 0;
+  line-height: 1.5;
+}
+
+.sighting-photo {
+  max-width: 100%;
+  max-height: 300px;
+  border-radius: 8px;
+  margin-top: 12px;
+  object-fit: cover;
+}
+
+.sighting-favorite {
+  padding: 4px 8px;
+  background: #fef3c7;
+  color: #92400e;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+/* Pagination Controls */
+.pagination-controls {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 16px;
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.pagination-info {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+.pagination-btn {
+  padding: 8px 16px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  cursor: pointer;
+  font-weight: 500;
+  transition: opacity 0.15s;
+}
+
+.pagination-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.pagination-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.load-more-btn {
+  width: 100%;
+  padding: 12px;
+  margin-top: 16px;
+}
