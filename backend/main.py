@@ -35,7 +35,7 @@ from enum import Enum
 from math import radians, cos, sin, asin, sqrt
 from pathlib import Path
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Literal, Union, TypeVar, Callable, Awaitable
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Query
@@ -263,10 +263,14 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS cats (
             id {id_type},
             name TEXT,
-            createdAt TEXT NOT NULL
+            createdAt TEXT NOT NULL,
+            updatedAt TEXT
         )
         """
     )
+
+    # Add updatedAt column for existing databases
+    _try_alter_table(conn, cur, "ALTER TABLE cats ADD COLUMN updatedAt TEXT")
 
     # --- Entries table (sightings) - depends on cats ---
     execute_query(cur,
