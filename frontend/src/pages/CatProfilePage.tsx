@@ -7,6 +7,7 @@ import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useCatProfile } from "../hooks/useCatProfile";
 import { CatHeader } from "../components/cat-profile/CatHeader";
+import { CommentsPanel } from "../components/cat-profile/CommentsPanel";
 import type { EnhancedCatProfile, CatUpdateResponse, PaginatedSighting } from "../api/endpoints";
 import { getCatSightings } from "../api/endpoints";
 
@@ -306,6 +307,9 @@ function OverviewTab({ profile }: { profile: EnhancedCatProfile }) {
           )}
         </section>
       )}
+
+      {/* Community Comments */}
+      <CommentsPanel catId={profile.cat.id} />
     </div>
   );
 }

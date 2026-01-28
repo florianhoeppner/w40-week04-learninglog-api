@@ -349,6 +349,21 @@ def init_db() -> None:
         """
     )
 
+    # --- Cat comments table - community comments on cat profiles ---
+    execute_query(cur,
+        f"""
+        CREATE TABLE IF NOT EXISTS cat_comments (
+            id {id_type},
+            cat_id {int_type} NOT NULL,
+            author_name TEXT NOT NULL,
+            content TEXT NOT NULL,
+            createdAt TEXT NOT NULL,
+            updatedAt TEXT NOT NULL,
+            FOREIGN KEY(cat_id) REFERENCES cats(id) ON DELETE CASCADE
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -1803,6 +1818,182 @@ def update_cat(cat_id: int, payload: CatUpdatePayload):
         name=new_name,
         updatedAt=now,
     )
+
+
+# -----------------------------------------------------------------------------
+# Cat Comments (Community Feature)
+# -----------------------------------------------------------------------------
+
+class CommentCreate(BaseModel):
+    """Payload for creating a new comment."""
+    author_name: str = Field(..., min_length=1, max_length=100)
+    content: str = Field(..., min_length=1, max_length=2000)
+
+
+class Comment(BaseModel):
+    """A comment on a cat profile."""
+    id: int
+    cat_id: int
+    author_name: str
+    content: str
+    createdAt: str
+    updatedAt: str
+
+
+class PaginatedCommentsResponse(BaseModel):
+    """Paginated comments response."""
+    comments: List[Comment]
+    total: int
+    page: int
+    limit: int
+    totalPages: int
+    hasMore: bool
+
+
+@app.post("/cats/{cat_id}/comments", response_model=Comment, status_code=201)
+def create_comment(cat_id: int, payload: CommentCreate):
+    """
+    Add a new comment to a cat's profile.
+
+    Comments are community-contributed notes about a cat.
+    Author name is required (anonymous comments not supported).
+    """
+    conn = get_conn()
+    cur = get_cursor(conn)
+
+    # Verify cat exists
+    execute_query(cur, "SELECT id FROM cats WHERE id = ?", (cat_id,))
+    cat_row = cur.fetchone()
+    if cat_row is None:
+        conn.close()
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "CAT_NOT_FOUND", "message": f"Cat with ID {cat_id} not found", "retryable": False}
+        )
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    execute_query(cur,
+        """
+        INSERT INTO cat_comments (cat_id, author_name, content, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (cat_id, payload.author_name.strip(), payload.content.strip(), now, now),
+    )
+
+    comment_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    return Comment(
+        id=comment_id,
+        cat_id=cat_id,
+        author_name=payload.author_name.strip(),
+        content=payload.content.strip(),
+        createdAt=now,
+        updatedAt=now,
+    )
+
+
+@app.get("/cats/{cat_id}/comments", response_model=PaginatedCommentsResponse)
+def get_cat_comments(
+    cat_id: int,
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+    limit: int = Query(20, ge=1, le=100, description="Items per page"),
+):
+    """
+    Get paginated comments for a cat's profile.
+
+    Returns comments ordered by date (newest first).
+    """
+    conn = get_conn()
+    cur = get_cursor(conn)
+
+    # Verify cat exists
+    execute_query(cur, "SELECT id FROM cats WHERE id = ?", (cat_id,))
+    cat_row = cur.fetchone()
+    if cat_row is None:
+        conn.close()
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "CAT_NOT_FOUND", "message": f"Cat with ID {cat_id} not found", "retryable": False}
+        )
+
+    # Get total count
+    execute_query(cur, "SELECT COUNT(*) as count FROM cat_comments WHERE cat_id = ?", (cat_id,))
+    total = cur.fetchone()["count"]
+
+    # Calculate pagination
+    offset = (page - 1) * limit
+    total_pages = max(1, (total + limit - 1) // limit)
+
+    # Fetch comments for this page
+    execute_query(cur,
+        """
+        SELECT id, cat_id, author_name, content, createdAt, updatedAt
+        FROM cat_comments
+        WHERE cat_id = ?
+        ORDER BY createdAt DESC
+        LIMIT ? OFFSET ?
+        """,
+        (cat_id, limit, offset),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    comments = []
+    for row in rows:
+        created_at = row_get(row, "createdAt") or row_get(row, "createdat") or ""
+        updated_at = row_get(row, "updatedAt") or row_get(row, "updatedat") or ""
+        comments.append(Comment(
+            id=row["id"],
+            cat_id=row["cat_id"],
+            author_name=row["author_name"],
+            content=row["content"],
+            createdAt=created_at,
+            updatedAt=updated_at,
+        ))
+
+    return PaginatedCommentsResponse(
+        comments=comments,
+        total=total,
+        page=page,
+        limit=limit,
+        totalPages=total_pages,
+        hasMore=page < total_pages,
+    )
+
+
+@app.delete("/cats/{cat_id}/comments/{comment_id}", status_code=204)
+def delete_comment(cat_id: int, comment_id: int):
+    """
+    Delete a comment from a cat's profile.
+
+    Note: In a production app, this would require authentication
+    and authorization to ensure only the author can delete.
+    """
+    conn = get_conn()
+    cur = get_cursor(conn)
+
+    # Verify comment exists and belongs to this cat
+    execute_query(cur,
+        "SELECT id FROM cat_comments WHERE id = ? AND cat_id = ?",
+        (comment_id, cat_id),
+    )
+    comment_row = cur.fetchone()
+
+    if comment_row is None:
+        conn.close()
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COMMENT_NOT_FOUND", "message": f"Comment {comment_id} not found for cat {cat_id}", "retryable": False}
+        )
+
+    execute_query(cur, "DELETE FROM cat_comments WHERE id = ?", (comment_id,))
+    conn.commit()
+    conn.close()
+
+    return None
 
 
 @app.get("/entries/{entry_id}/matches", response_model=List[MatchCandidate])
