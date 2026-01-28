@@ -2,22 +2,33 @@
 
 ## Current Version
 
-**Backend**: v1.0.2 - Bunny.net CDN Integration (2026-01-26)
-- ✅ Image upload with Bunny.net CDN storage
-- ✅ Retry logic with exponential backoff (3 attempts)
-- ✅ Circuit breaker pattern for resilience
-- ✅ Fixed default region endpoint configuration
-- ✅ Diagnostic tools and comprehensive troubleshooting guide
+**Backend**: v1.1.0 - Cat Deduplication System (2026-01-28)
+- ✅ Location normalization with OpenStreetMap Nominatim
+- ✅ Nearby sighting discovery with configurable radius
+- ✅ Validation workflow for linking sightings to cats
+- ✅ Area-based clustering and suggested groupings
+- ✅ Structured address fields (street, number, zip, city, country)
+- ✅ Circuit breaker and retry logic for geocoding
 
-**Frontend**: Deployed on Vercel with image upload support
+**Frontend**: v1.1.0 - Deduplication UI with Dark Mode
+- ✅ Similar/Nearby panel for sighting discovery
+- ✅ Create Cat and Link to Cat modals
+- ✅ Interactive map view with Leaflet
+- ✅ Dark mode support with theme colors
+- ✅ Structured address form fields
+
+**Previous**: v1.0.2 - Bunny.net CDN Integration (2026-01-26)
+- ✅ Image upload with Bunny.net CDN storage
+- ✅ Retry logic with exponential backoff
+- ✅ Circuit breaker pattern for resilience
 
 **Recent Changes**:
-- Fixed Bunny.net region endpoint (empty string for default Falkenstein region)
-- Added retry logic and circuit breaker for CDN uploads
-- Implemented multipart/form-data endpoints for image uploads
-- Created diagnostic tool (`debug_bunny.py`) for testing connectivity
-- Expanded CORS configuration for Vercel preview URLs
-- Added comprehensive troubleshooting documentation
+- Added 4-phase cat deduplication system (backend + frontend)
+- Replaced free-text location with structured address fields
+- Added OpenStreetMap Nominatim integration for geocoding
+- Created interactive map view with Leaflet and clustering
+- Added dark mode support with useDarkMode hook
+- Fixed Unicode display issues in UI components
 
 ## Project Context
 **CatAtlas** is a full-stack web application for tracking and managing feral/stray cat sightings. It features AI-powered insights, duplicate detection, and community-driven cat profiles. Built as a learning project demonstrating RESTful API design, modern React development, and CI/CD practices.
@@ -50,9 +61,18 @@
   - `conftest.py` - Test fixtures with environment isolation
 
 ### Frontend
-- `frontend/src/App.tsx` - Main React component
+- `frontend/src/App.tsx` - Main React component with view mode tabs (List/Map)
 - `frontend/src/main.tsx` - React entry point
-- `frontend/package.json` - Node dependencies & scripts
+- `frontend/src/api/endpoints.ts` - API type definitions and endpoint functions
+- `frontend/src/api/upload.ts` - Image upload with structured address support
+- `frontend/src/hooks/useDarkMode.ts` - Dark mode detection and theme colors
+- `frontend/src/components/SimilarNearbyPanel.tsx` - Panel for finding similar/nearby sightings
+- `frontend/src/components/CreateCatModal.tsx` - Modal to create cats from sightings
+- `frontend/src/components/LinkToCatModal.tsx` - Modal to link sightings to existing cats
+- `frontend/src/components/SightingsMap.tsx` - Interactive Leaflet map with clustering
+- `frontend/src/components/LocationStatus.tsx` - Location normalization status display
+- `frontend/src/components/Toast.tsx` - Toast notification system
+- `frontend/package.json` - Node dependencies (includes leaflet, react-leaflet)
 - `frontend/vite.config.ts` - Vite configuration
 - `frontend/tsconfig.json` - TypeScript configuration
 
@@ -186,6 +206,79 @@ cd backend
 python debug_bunny.py  # Tests connectivity, credentials, and permissions
 ```
 
+## Cat Deduplication System (v1.1.0)
+
+### Overview
+The deduplication system helps identify when multiple sightings might be of the same cat, using location normalization and similarity matching.
+
+### Backend Phases
+
+**Phase 1: Location Normalization**
+- OpenStreetMap Nominatim integration for geocoding
+- Structured address fields: `location_street`, `location_number`, `location_zip`, `location_city`, `location_country`
+- Combined location string built from components for better geocoding accuracy
+- Circuit breaker pattern for resilience (5 failures → 60s cooldown)
+- Retry logic with exponential backoff (2 attempts, 1s base delay)
+
+**Phase 2: Enhanced Location Matching**
+- `GET /entries/{id}/nearby` - Find sightings within configurable radius
+- Text similarity scoring using word overlap
+- Distance calculation using Haversine formula
+- Returns match scores and distance in meters
+
+**Phase 3: Validation Workflow**
+- `POST /cats/{id}/link-sightings` - Bulk link sightings to existing cat
+- `POST /cats/from-sightings` - Create new cat from sighting group
+- Suggested name generation based on common location
+
+**Phase 4: Area-based Clustering**
+- `GET /entries/by-area` - Query sightings by geographic center + radius
+- `GET /entries/suggested-groups` - AI-generated sighting clusters
+- Confidence scoring based on proximity and text similarity
+
+### Frontend Components
+
+**SimilarNearbyPanel** (`frontend/src/components/SimilarNearbyPanel.tsx`)
+- Slide-in panel with tabs for "Similar Text" and "Nearby"
+- Radius slider for adjusting search distance (100m - 2km)
+- Selection state with bulk actions
+- Dark mode support via `useThemeColors` hook
+
+**CreateCatModal** (`frontend/src/components/CreateCatModal.tsx`)
+- Modal for creating cats from selected sightings
+- Suggested name based on common location
+- Preview of selected sightings
+
+**LinkToCatModal** (`frontend/src/components/LinkToCatModal.tsx`)
+- Modal for linking sightings to existing cats
+- Cat search and selection
+- Result summary with success/failure counts
+
+**SightingsMap** (`frontend/src/components/SightingsMap.tsx`)
+- Interactive Leaflet map
+- Custom markers for assigned/unassigned sightings
+- Area-based queries on map move
+- Cluster visualization with confidence colors
+
+### Dark Mode Support
+- `useDarkMode` hook detects system preference
+- `useThemeColors` returns appropriate color palette
+- All deduplication components support light/dark themes
+
+### Structured Address Form
+The entry form uses 5 separate fields instead of free-text:
+```
+┌─────────────────────┬────────────┐
+│ Street              │ Number     │
+├──────────┬──────────┴────────────┤
+│ ZIP      │ City                  │
+├──────────┴───────────────────────┤
+│ Country                          │
+└──────────────────────────────────┘
+```
+
+Combined into: "Street Number, ZIP City, Country" for geocoding.
+
 ## Development Guidelines
 - Use Python 3.11+ for backend development
 - Follow PEP 8 style guidelines (enforced by flake8)
@@ -292,6 +385,16 @@ docker run -p 8000:8000 catatlas-backend
 - AI analysis: `GET /entries/{id}/analysis`, `POST /entries/{id}/analyze`
 - Cat profiles: `GET/POST /cats`
 - Cat insights: `POST /cats/{id}/insights`
+
+### Deduplication Endpoints (v1.1.0)
+- Location: `POST /entries/{id}/normalize-location` - Geocode entry location
+- Location: `GET /geocoding/health` - Check geocoding service status
+- Matching: `GET /entries/{id}/matches` - Find similar sightings by text
+- Matching: `GET /entries/{id}/nearby` - Find nearby sightings by location
+- Workflow: `POST /cats/{id}/link-sightings` - Bulk link sightings to cat
+- Workflow: `POST /cats/from-sightings` - Create cat from sighting group
+- Area: `GET /entries/by-area` - Query sightings in geographic area
+- Area: `GET /entries/suggested-groups` - Get suggested sighting clusters
 
 ## Important Notes
 
@@ -799,12 +902,23 @@ When migrating to PostgreSQL or adding PostgreSQL support:
 - [x] Multipart form-data handling
 - [x] Image validation (type, size limits)
 - [x] CDN integration with Pull Zone
+- [x] **Cat Deduplication System (v1.1.0)**
+  - [x] Location normalization with OpenStreetMap Nominatim
+  - [x] Nearby sighting discovery with radius search
+  - [x] Validation workflow (link sightings, create cats)
+  - [x] Area-based clustering and suggested groupings
+  - [x] Structured address fields for better geocoding
+- [x] **Deduplication UI (v1.1.0)**
+  - [x] Similar/Nearby panel with tabs
+  - [x] Create Cat and Link to Cat modals
+  - [x] Interactive map view with Leaflet
+  - [x] Dark mode support
+  - [x] Auto-location normalization after entry creation
 
 ### 🚧 Potential Future Enhancements
 - [ ] User authentication and authorization
 - [ ] Real-time updates with WebSockets
 - [ ] Advanced search and filtering
-- [ ] Map view of cat sightings
 - [ ] Email notifications for new sightings
 - [ ] Mobile app (React Native)
 - [ ] Database migrations tool (Alembic)
