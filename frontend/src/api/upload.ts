@@ -70,19 +70,37 @@ export async function uploadImage(file: File): Promise<string> {
   }
 }
 
+/** Structured address fields for entry creation */
+export interface AddressFields {
+  street?: string | null;
+  number?: string | null;
+  zip?: string | null;
+  city?: string | null;
+  country?: string | null;
+}
+
 /**
  * Create entry with image upload
  */
 export async function createEntryWithImage(
   text: string,
   nickname: string | null,
-  location: string | null,
+  address: AddressFields | null,
   image: File | null
 ): Promise<Entry> {
   const formData = new FormData();
   formData.append("text", text);
   if (nickname) formData.append("nickname", nickname);
-  if (location) formData.append("location", location);
+
+  // Add structured address fields
+  if (address) {
+    if (address.street) formData.append("location_street", address.street);
+    if (address.number) formData.append("location_number", address.number);
+    if (address.zip) formData.append("location_zip", address.zip);
+    if (address.city) formData.append("location_city", address.city);
+    if (address.country) formData.append("location_country", address.country);
+  }
+
   if (image) formData.append("image", image);
 
   try {
