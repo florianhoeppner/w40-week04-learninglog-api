@@ -90,9 +90,35 @@ export class CircuitBreaker {
       this.onSuccess();
       return result;
     } catch (error) {
-      this.onFailure();
+      // Only count server errors (5xx) and network errors as circuit breaker failures
+      // Client errors (4xx) like 404 are expected responses, not service failures
+      const shouldCountAsFailure = this.isCircuitBreakerFailure(error);
+      if (shouldCountAsFailure) {
+        this.onFailure();
+      }
       throw error;
     }
+  }
+
+  /**
+   * Determine if an error should count as a circuit breaker failure
+   * Only server errors (5xx) and network errors should trip the breaker
+   */
+  private isCircuitBreakerFailure(error: unknown): boolean {
+    if (error instanceof ApiError) {
+      const statusCode = error.details.statusCode;
+      // Only count server errors (5xx) and network errors
+      // Client errors (4xx) are expected responses, not service failures
+      if (statusCode && statusCode >= 400 && statusCode < 500) {
+        return false; // Don't count 4xx as failures
+      }
+      // Count 5xx errors, network errors, and timeouts as failures
+      return error.details.type === ErrorType.SERVER_ERROR ||
+             error.details.type === ErrorType.NETWORK_ERROR ||
+             error.details.type === ErrorType.TIMEOUT_ERROR;
+    }
+    // Unknown errors count as failures
+    return true;
   }
 
   /**
